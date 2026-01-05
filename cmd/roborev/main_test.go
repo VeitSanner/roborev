@@ -9,8 +9,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/user/roborev/internal/daemon"
-	"github.com/user/roborev/internal/storage"
+	"github.com/wesm/roborev/internal/daemon"
+	"github.com/wesm/roborev/internal/storage"
 )
 
 func TestEnqueueCmdPositionalArg(t *testing.T) {
@@ -66,14 +66,7 @@ func TestEnqueueCmdPositionalArg(t *testing.T) {
 	runGit("add", "file2.txt")
 	runGit("commit", "-m", "second commit")
 
-	// Get second commit SHA (HEAD)
-	cmd = exec.Command("git", "rev-parse", "HEAD")
-	cmd.Dir = tmpDir
-	headSHABytes, err := cmd.Output()
-	if err != nil {
-		t.Fatalf("Failed to get HEAD SHA: %v", err)
-	}
-	headSHA := string(headSHABytes[:len(headSHABytes)-1])
+	// Second commit is now HEAD (we don't need to track its SHA since CLI sends "HEAD" unresolved)
 
 	// Track what SHA was sent to the server
 	var receivedSHA string
@@ -82,12 +75,12 @@ func TestEnqueueCmdPositionalArg(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/enqueue" {
 			var req struct {
-				CommitSHA string `json:"commit_sha"`
+				GitRef string `json:"git_ref"`
 			}
 			json.NewDecoder(r.Body).Decode(&req)
-			receivedSHA = req.CommitSHA
+			receivedSHA = req.GitRef
 
-			job := storage.ReviewJob{ID: 1, Agent: "test"}
+			job := storage.ReviewJob{ID: 1, GitRef: req.GitRef, Agent: "test"}
 			w.WriteHeader(http.StatusCreated)
 			json.NewEncoder(w).Encode(job)
 			return
@@ -115,19 +108,20 @@ func TestEnqueueCmdPositionalArg(t *testing.T) {
 		receivedSHA = ""
 		serverAddr = ts.URL
 
+		shortFirstSHA := firstSHA[:7]
 		cmd := enqueueCmd()
-		cmd.SetArgs([]string{"--repo", tmpDir, firstSHA[:7]}) // Use short SHA as positional arg
+		cmd.SetArgs([]string{"--repo", tmpDir, shortFirstSHA}) // Use short SHA as positional arg
 		err := cmd.Execute()
 		if err != nil {
 			t.Fatalf("enqueue failed: %v", err)
 		}
 
-		// Should have received the first commit SHA, not HEAD
-		if receivedSHA != firstSHA {
-			t.Errorf("Expected SHA %s, got %s", firstSHA, receivedSHA)
+		// Should have received the first commit SHA (short form as entered), not HEAD
+		if receivedSHA != shortFirstSHA {
+			t.Errorf("Expected SHA %s, got %s", shortFirstSHA, receivedSHA)
 		}
-		if receivedSHA == headSHA {
-			t.Error("Received HEAD SHA instead of positional arg - bug not fixed!")
+		if receivedSHA == "HEAD" {
+			t.Error("Received HEAD instead of positional arg - bug not fixed!")
 		}
 	})
 
@@ -136,15 +130,16 @@ func TestEnqueueCmdPositionalArg(t *testing.T) {
 		receivedSHA = ""
 		serverAddr = ts.URL
 
+		shortFirstSHA := firstSHA[:7]
 		cmd := enqueueCmd()
-		cmd.SetArgs([]string{"--repo", tmpDir, "--sha", firstSHA[:7]})
+		cmd.SetArgs([]string{"--repo", tmpDir, "--sha", shortFirstSHA})
 		err := cmd.Execute()
 		if err != nil {
 			t.Fatalf("enqueue failed: %v", err)
 		}
 
-		if receivedSHA != firstSHA {
-			t.Errorf("Expected SHA %s, got %s", firstSHA, receivedSHA)
+		if receivedSHA != shortFirstSHA {
+			t.Errorf("Expected SHA %s, got %s", shortFirstSHA, receivedSHA)
 		}
 	})
 
@@ -160,8 +155,9 @@ func TestEnqueueCmdPositionalArg(t *testing.T) {
 			t.Fatalf("enqueue failed: %v", err)
 		}
 
-		if receivedSHA != headSHA {
-			t.Errorf("Expected HEAD SHA %s, got %s", headSHA, receivedSHA)
+		// When no arg provided, CLI sends "HEAD" which gets resolved server-side
+		if receivedSHA != "HEAD" {
+			t.Errorf("Expected HEAD, got %s", receivedSHA)
 		}
 	})
 }

@@ -12,26 +12,34 @@ func (db *DB) GetReviewByJobID(jobID int64) (*Review, error) {
 	var job ReviewJob
 	var enqueuedAt string
 	var startedAt, finishedAt, workerID, errMsg sql.NullString
+	var commitID sql.NullInt64
+	var commitSubject sql.NullString
 
 	err := db.QueryRow(`
 		SELECT rv.id, rv.job_id, rv.agent, rv.prompt, rv.output, rv.created_at,
-		       j.id, j.repo_id, j.commit_id, j.agent, j.status, j.enqueued_at,
+		       j.id, j.repo_id, j.commit_id, j.git_ref, j.agent, j.status, j.enqueued_at,
 		       j.started_at, j.finished_at, j.worker_id, j.error,
-		       rp.root_path, rp.name, c.sha, c.subject
+		       rp.root_path, rp.name, c.subject
 		FROM reviews rv
 		JOIN review_jobs j ON j.id = rv.job_id
 		JOIN repos rp ON rp.id = j.repo_id
-		JOIN commits c ON c.id = j.commit_id
+		LEFT JOIN commits c ON c.id = j.commit_id
 		WHERE rv.job_id = ?
 	`, jobID).Scan(&r.ID, &r.JobID, &r.Agent, &r.Prompt, &r.Output, &createdAt,
-		&job.ID, &job.RepoID, &job.CommitID, &job.Agent, &job.Status, &enqueuedAt,
+		&job.ID, &job.RepoID, &commitID, &job.GitRef, &job.Agent, &job.Status, &enqueuedAt,
 		&startedAt, &finishedAt, &workerID, &errMsg,
-		&job.RepoPath, &job.RepoName, &job.CommitSHA, &job.CommitSubject)
+		&job.RepoPath, &job.RepoName, &commitSubject)
 	if err != nil {
 		return nil, err
 	}
 
 	r.CreatedAt, _ = time.Parse(time.RFC3339, createdAt)
+	if commitID.Valid {
+		job.CommitID = &commitID.Int64
+	}
+	if commitSubject.Valid {
+		job.CommitSubject = commitSubject.String
+	}
 	job.EnqueuedAt, _ = time.Parse(time.RFC3339, enqueuedAt)
 	if startedAt.Valid {
 		t, _ := time.Parse(time.RFC3339, startedAt.String)
@@ -52,32 +60,42 @@ func (db *DB) GetReviewByJobID(jobID int64) (*Review, error) {
 	return &r, nil
 }
 
-// GetReviewByCommitSHA finds the most recent review by commit SHA
+// GetReviewByCommitSHA finds the most recent review by commit SHA (searches git_ref field)
 func (db *DB) GetReviewByCommitSHA(sha string) (*Review, error) {
 	var r Review
 	var createdAt string
 	var job ReviewJob
 	var enqueuedAt string
 	var startedAt, finishedAt, workerID, errMsg sql.NullString
+	var commitID sql.NullInt64
+	var commitSubject sql.NullString
 
+	// Search by git_ref which contains the SHA for single commits
 	err := db.QueryRow(`
 		SELECT rv.id, rv.job_id, rv.agent, rv.prompt, rv.output, rv.created_at,
-		       j.id, j.repo_id, j.commit_id, j.agent, j.status, j.enqueued_at,
+		       j.id, j.repo_id, j.commit_id, j.git_ref, j.agent, j.status, j.enqueued_at,
 		       j.started_at, j.finished_at, j.worker_id, j.error,
-		       rp.root_path, rp.name, c.sha, c.subject
+		       rp.root_path, rp.name, c.subject
 		FROM reviews rv
 		JOIN review_jobs j ON j.id = rv.job_id
 		JOIN repos rp ON rp.id = j.repo_id
-		JOIN commits c ON c.id = j.commit_id
-		WHERE c.sha = ?
+		LEFT JOIN commits c ON c.id = j.commit_id
+		WHERE j.git_ref = ?
 		ORDER BY rv.created_at DESC
 		LIMIT 1
 	`, sha).Scan(&r.ID, &r.JobID, &r.Agent, &r.Prompt, &r.Output, &createdAt,
-		&job.ID, &job.RepoID, &job.CommitID, &job.Agent, &job.Status, &enqueuedAt,
+		&job.ID, &job.RepoID, &commitID, &job.GitRef, &job.Agent, &job.Status, &enqueuedAt,
 		&startedAt, &finishedAt, &workerID, &errMsg,
-		&job.RepoPath, &job.RepoName, &job.CommitSHA, &job.CommitSubject)
+		&job.RepoPath, &job.RepoName, &commitSubject)
 	if err != nil {
 		return nil, err
+	}
+
+	if commitID.Valid {
+		job.CommitID = &commitID.Int64
+	}
+	if commitSubject.Valid {
+		job.CommitSubject = commitSubject.String
 	}
 
 	r.CreatedAt, _ = time.Parse(time.RFC3339, createdAt)

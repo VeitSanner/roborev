@@ -7,9 +7,9 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/user/roborev/internal/config"
-	"github.com/user/roborev/internal/daemon"
-	"github.com/user/roborev/internal/storage"
+	"github.com/wesm/roborev/internal/config"
+	"github.com/wesm/roborev/internal/daemon"
+	"github.com/wesm/roborev/internal/storage"
 )
 
 func main() {

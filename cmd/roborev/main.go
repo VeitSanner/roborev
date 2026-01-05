@@ -15,10 +15,10 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
-	"github.com/user/roborev/internal/config"
-	"github.com/user/roborev/internal/daemon"
-	"github.com/user/roborev/internal/git"
-	"github.com/user/roborev/internal/storage"
+	"github.com/wesm/roborev/internal/config"
+	"github.com/wesm/roborev/internal/daemon"
+	"github.com/wesm/roborev/internal/git"
+	"github.com/wesm/roborev/internal/storage"
 )
 
 var (
@@ -279,8 +279,15 @@ func enqueueCmd() *cobra.Command {
 	)
 
 	cmd := &cobra.Command{
-		Use:   "enqueue [commit]",
-		Short: "Enqueue a commit for review",
+		Use:   "enqueue [commit] or enqueue [start] [end]",
+		Short: "Enqueue a commit or commit range for review",
+		Long: `Enqueue a commit or commit range for review.
+
+Examples:
+  roborev enqueue              # Review HEAD
+  roborev enqueue abc123       # Review specific commit
+  roborev enqueue abc123 def456  # Review range from abc123 to def456 (inclusive)
+`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			// Ensure daemon is running
 			if err := ensureDaemon(); err != nil {
@@ -298,22 +305,23 @@ func enqueueCmd() *cobra.Command {
 				return fmt.Errorf("not a git repository: %w", err)
 			}
 
-			// Use positional arg if provided
-			if len(args) > 0 {
-				sha = args[0]
+			var gitRef string
+			if len(args) >= 2 {
+				// Range: START END -> START^..END (inclusive)
+				gitRef = args[0] + "^.." + args[1]
+			} else if len(args) == 1 {
+				// Single commit
+				gitRef = args[0]
+			} else {
+				// Default to HEAD
+				gitRef = sha
 			}
 
-			// Resolve SHA
-			resolvedSHA, err := git.ResolveSHA(root, sha)
-			if err != nil {
-				return fmt.Errorf("invalid commit: %w", err)
-			}
-
-			// Make request
+			// Make request - server will validate and resolve refs
 			reqBody, _ := json.Marshal(map[string]string{
-				"repo_path":  root,
-				"commit_sha": resolvedSHA,
-				"agent":      agent,
+				"repo_path": root,
+				"git_ref":   gitRef,
+				"agent":     agent,
 			})
 
 			resp, err := http.Post(serverAddr+"/api/enqueue", "application/json", bytes.NewReader(reqBody))
@@ -330,13 +338,13 @@ func enqueueCmd() *cobra.Command {
 			var job storage.ReviewJob
 			json.Unmarshal(body, &job)
 
-			fmt.Printf("Enqueued job %d for commit %s (agent: %s)\n", job.ID, shortSHA(resolvedSHA), job.Agent)
+			fmt.Printf("Enqueued job %d for %s (agent: %s)\n", job.ID, shortRef(job.GitRef), job.Agent)
 			return nil
 		},
 	}
 
 	cmd.Flags().StringVar(&repoPath, "repo", "", "path to git repository (default: current directory)")
-	cmd.Flags().StringVar(&sha, "sha", "HEAD", "commit SHA to review")
+	cmd.Flags().StringVar(&sha, "sha", "HEAD", "commit SHA to review (used when no positional args)")
 	cmd.Flags().StringVar(&agent, "agent", "", "agent to use (codex, claude-code)")
 
 	return cmd
@@ -397,7 +405,7 @@ func statusCmd() *cobra.Command {
 						}
 					}
 					fmt.Fprintf(w, "  %d\t%s\t%s\t%s\t%s\t%s\n",
-						j.ID, shortSHA(j.CommitSHA), j.RepoName, j.Agent, j.Status, elapsed)
+						j.ID, shortRef(j.GitRef), j.RepoName, j.Agent, j.Status, elapsed)
 				}
 				w.Flush()
 			}
@@ -581,4 +589,16 @@ func shortSHA(sha string) string {
 		return sha[:7]
 	}
 	return sha
+}
+
+func shortRef(ref string) string {
+	// For ranges like "abc123..def456", show as "abc123..def456" (up to 17 chars)
+	// For single SHAs, truncate to 7 chars
+	if strings.Contains(ref, "..") {
+		if len(ref) > 17 {
+			return ref[:17]
+		}
+		return ref
+	}
+	return shortSHA(ref)
 }

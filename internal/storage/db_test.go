@@ -88,7 +88,7 @@ func TestJobLifecycle(t *testing.T) {
 	commit, _ := db.GetOrCreateCommit(repo.ID, "abc123", "Author", "Subject", time.Now())
 
 	// Enqueue job
-	job, err := db.EnqueueJob(repo.ID, commit.ID, "codex")
+	job, err := db.EnqueueJob(repo.ID, commit.ID, "abc123", "codex")
 	if err != nil {
 		t.Fatalf("EnqueueJob failed: %v", err)
 	}
@@ -144,7 +144,7 @@ func TestJobFailure(t *testing.T) {
 	repo, _ := db.GetOrCreateRepo("/tmp/test-repo")
 	commit, _ := db.GetOrCreateCommit(repo.ID, "def456", "Author", "Subject", time.Now())
 
-	job, _ := db.EnqueueJob(repo.ID, commit.ID, "codex")
+	job, _ := db.EnqueueJob(repo.ID, commit.ID, "def456", "codex")
 	db.ClaimJob("worker-1")
 
 	// Fail the job
@@ -168,7 +168,7 @@ func TestReviewOperations(t *testing.T) {
 
 	repo, _ := db.GetOrCreateRepo("/tmp/test-repo")
 	commit, _ := db.GetOrCreateCommit(repo.ID, "rev123", "Author", "Subject", time.Now())
-	job, _ := db.EnqueueJob(repo.ID, commit.ID, "codex")
+	job, _ := db.EnqueueJob(repo.ID, commit.ID, "rev123", "codex")
 	db.ClaimJob("worker-1")
 	db.CompleteJob(job.ID, "codex", "the prompt", "the review output")
 
@@ -222,13 +222,14 @@ func TestJobCounts(t *testing.T) {
 
 	// Create 3 jobs that will stay queued
 	for i := 0; i < 3; i++ {
-		commit, _ := db.GetOrCreateCommit(repo.ID, fmt.Sprintf("queued%d", i), "A", "S", time.Now())
-		db.EnqueueJob(repo.ID, commit.ID, "codex")
+		sha := fmt.Sprintf("queued%d", i)
+		commit, _ := db.GetOrCreateCommit(repo.ID, sha, "A", "S", time.Now())
+		db.EnqueueJob(repo.ID, commit.ID, sha, "codex")
 	}
 
 	// Create a job, claim it, and complete it
 	commit, _ := db.GetOrCreateCommit(repo.ID, "done1", "A", "S", time.Now())
-	job, _ := db.EnqueueJob(repo.ID, commit.ID, "codex")
+	job, _ := db.EnqueueJob(repo.ID, commit.ID, "done1", "codex")
 	_, _ = db.ClaimJob("w1") // Claims oldest queued job (one of queued0-2)
 	_, _ = db.ClaimJob("w1") // Claims next
 	_, _ = db.ClaimJob("w1") // Claims next
@@ -239,7 +240,7 @@ func TestJobCounts(t *testing.T) {
 
 	// Create a job, claim it, and fail it
 	commit2, _ := db.GetOrCreateCommit(repo.ID, "fail1", "A", "S", time.Now())
-	_, _ = db.EnqueueJob(repo.ID, commit2.ID, "codex")
+	_, _ = db.EnqueueJob(repo.ID, commit2.ID, "fail1", "codex")
 	claimed2, _ := db.ClaimJob("w2")
 	if claimed2 != nil {
 		db.FailJob(claimed2.ID, "err")

@@ -11,9 +11,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/user/roborev/internal/config"
-	"github.com/user/roborev/internal/daemon"
-	"github.com/user/roborev/internal/storage"
+	"github.com/wesm/roborev/internal/config"
+	"github.com/wesm/roborev/internal/daemon"
+	"github.com/wesm/roborev/internal/storage"
 )
 
 // TestE2EEnqueueAndReview tests the full flow of enqueueing and reviewing a commit
@@ -102,7 +102,7 @@ func TestDatabaseIntegration(t *testing.T) {
 		t.Fatalf("GetOrCreateCommit failed: %v", err)
 	}
 
-	job, err := db.EnqueueJob(repo.ID, commit.ID, "codex")
+	job, err := db.EnqueueJob(repo.ID, commit.ID, "abc123", "codex")
 	if err != nil {
 		t.Fatalf("EnqueueJob failed: %v", err)
 	}

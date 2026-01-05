@@ -31,7 +31,8 @@ const (
 type ReviewJob struct {
 	ID         int64      `json:"id"`
 	RepoID     int64      `json:"repo_id"`
-	CommitID   int64      `json:"commit_id"`
+	CommitID   *int64     `json:"commit_id,omitempty"` // nil for ranges
+	GitRef     string     `json:"git_ref"`             // SHA or "start..end" for ranges
 	Agent      string     `json:"agent"`
 	Status     JobStatus  `json:"status"`
 	EnqueuedAt time.Time  `json:"enqueued_at"`
@@ -43,8 +44,7 @@ type ReviewJob struct {
 	// Joined fields for convenience
 	RepoPath      string `json:"repo_path,omitempty"`
 	RepoName      string `json:"repo_name,omitempty"`
-	CommitSHA     string `json:"commit_sha,omitempty"`
-	CommitSubject string `json:"commit_subject,omitempty"`
+	CommitSubject string `json:"commit_subject,omitempty"` // empty for ranges
 }
 
 type Review struct {

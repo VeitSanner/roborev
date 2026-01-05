@@ -8,10 +8,10 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/user/roborev/internal/agent"
-	"github.com/user/roborev/internal/config"
-	"github.com/user/roborev/internal/prompt"
-	"github.com/user/roborev/internal/storage"
+	"github.com/wesm/roborev/internal/agent"
+	"github.com/wesm/roborev/internal/config"
+	"github.com/wesm/roborev/internal/prompt"
+	"github.com/wesm/roborev/internal/storage"
 )
 
 // WorkerPool manages a pool of review workers
@@ -96,13 +96,13 @@ func (wp *WorkerPool) worker(id int) {
 }
 
 func (wp *WorkerPool) processJob(workerID string, job *storage.ReviewJob) {
-	log.Printf("[%s] Processing job %d for commit %s in %s", workerID, job.ID, job.CommitSHA, job.RepoName)
+	log.Printf("[%s] Processing job %d for ref %s in %s", workerID, job.ID, job.GitRef, job.RepoName)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
 
 	// Build the prompt
-	reviewPrompt, err := wp.promptBuilder.Build(job.RepoPath, job.CommitSHA, job.RepoID, wp.cfg.ReviewContextCount)
+	reviewPrompt, err := wp.promptBuilder.Build(job.RepoPath, job.GitRef, job.RepoID, wp.cfg.ReviewContextCount)
 	if err != nil {
 		log.Printf("[%s] Error building prompt: %v", workerID, err)
 		wp.db.FailJob(job.ID, fmt.Sprintf("build prompt: %v", err))
@@ -119,7 +119,7 @@ func (wp *WorkerPool) processJob(workerID string, job *storage.ReviewJob) {
 
 	// Run the review
 	log.Printf("[%s] Running %s review...", workerID, job.Agent)
-	output, err := a.Review(ctx, job.RepoPath, job.CommitSHA, reviewPrompt)
+	output, err := a.Review(ctx, job.RepoPath, job.GitRef, reviewPrompt)
 	if err != nil {
 		log.Printf("[%s] Agent error: %v", workerID, err)
 		wp.db.FailJob(job.ID, fmt.Sprintf("agent: %v", err))

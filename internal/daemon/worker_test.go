@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/user/roborev/internal/config"
-	"github.com/user/roborev/internal/storage"
+	"github.com/wesm/roborev/internal/config"
+	"github.com/wesm/roborev/internal/storage"
 )
 
 func TestWorkerPoolE2E(t *testing.T) {
@@ -36,7 +36,7 @@ func TestWorkerPoolE2E(t *testing.T) {
 	}
 
 	// Enqueue a job with test agent
-	job, err := db.EnqueueJob(repo.ID, commit.ID, "test")
+	job, err := db.EnqueueJob(repo.ID, commit.ID, "testsha123", "test")
 	if err != nil {
 		t.Fatalf("EnqueueJob failed: %v", err)
 	}
@@ -99,9 +99,9 @@ func TestWorkerPoolConcurrency(t *testing.T) {
 
 	// Create multiple jobs
 	for i := 0; i < 5; i++ {
-		commit, _ := db.GetOrCreateCommit(repo.ID,
-			"concurrentsha"+string(rune('0'+i)), "Author", "Subject", time.Now())
-		db.EnqueueJob(repo.ID, commit.ID, "test")
+		sha := "concurrentsha" + string(rune('0'+i))
+		commit, _ := db.GetOrCreateCommit(repo.ID, sha, "Author", "Subject", time.Now())
+		db.EnqueueJob(repo.ID, commit.ID, sha, "test")
 	}
 
 	pool := NewWorkerPool(db, cfg, 4)

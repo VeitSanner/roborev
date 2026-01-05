@@ -6,11 +6,12 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
-	"github.com/user/roborev/internal/config"
-	"github.com/user/roborev/internal/git"
-	"github.com/user/roborev/internal/storage"
+	"github.com/wesm/roborev/internal/config"
+	"github.com/wesm/roborev/internal/git"
+	"github.com/wesm/roborev/internal/storage"
 )
 
 // Server is the HTTP API server for the daemon
@@ -98,7 +99,8 @@ func (s *Server) Stop() error {
 
 type EnqueueRequest struct {
 	RepoPath  string `json:"repo_path"`
-	CommitSHA string `json:"commit_sha"`
+	CommitSHA string `json:"commit_sha,omitempty"` // Single commit (for backwards compat)
+	GitRef    string `json:"git_ref,omitempty"`    // Single commit or range like "abc..def"
 	Agent     string `json:"agent,omitempty"`
 }
 
@@ -128,28 +130,21 @@ func (s *Server) handleEnqueue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if req.RepoPath == "" || req.CommitSHA == "" {
-		writeError(w, http.StatusBadRequest, "repo_path and commit_sha are required")
+	// Support both git_ref and commit_sha (backwards compat)
+	gitRef := req.GitRef
+	if gitRef == "" {
+		gitRef = req.CommitSHA
+	}
+
+	if req.RepoPath == "" || gitRef == "" {
+		writeError(w, http.StatusBadRequest, "repo_path and git_ref (or commit_sha) are required")
 		return
 	}
 
-	// Resolve repo root and SHA
+	// Resolve repo root
 	repoRoot, err := git.GetRepoRoot(req.RepoPath)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, fmt.Sprintf("not a git repository: %v", err))
-		return
-	}
-
-	sha, err := git.ResolveSHA(repoRoot, req.CommitSHA)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid commit: %v", err))
-		return
-	}
-
-	// Get commit info
-	info, err := git.GetCommitInfo(repoRoot, sha)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, fmt.Sprintf("get commit info: %v", err))
 		return
 	}
 
@@ -160,28 +155,67 @@ func (s *Server) handleEnqueue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Get or create commit
-	commit, err := s.db.GetOrCreateCommit(repo.ID, sha, info.Author, info.Subject, info.Timestamp)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, fmt.Sprintf("get commit: %v", err))
-		return
-	}
-
 	// Resolve agent
-	agent := config.ResolveAgent(req.Agent, repoRoot, s.cfg)
+	agentName := config.ResolveAgent(req.Agent, repoRoot, s.cfg)
 
-	// Create job
-	job, err := s.db.EnqueueJob(repo.ID, commit.ID, agent)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, fmt.Sprintf("enqueue job: %v", err))
-		return
+	// Check if this is a range or single commit
+	isRange := strings.Contains(gitRef, "..")
+
+	var job *storage.ReviewJob
+	if isRange {
+		// For ranges, resolve both endpoints and create range job
+		parts := strings.SplitN(gitRef, "..", 2)
+		startSHA, err := git.ResolveSHA(repoRoot, parts[0])
+		if err != nil {
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid start commit: %v", err))
+			return
+		}
+		endSHA, err := git.ResolveSHA(repoRoot, parts[1])
+		if err != nil {
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid end commit: %v", err))
+			return
+		}
+
+		// Store as full SHA range
+		fullRef := startSHA + ".." + endSHA
+		job, err = s.db.EnqueueRangeJob(repo.ID, fullRef, agentName)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, fmt.Sprintf("enqueue job: %v", err))
+			return
+		}
+	} else {
+		// Single commit
+		sha, err := git.ResolveSHA(repoRoot, gitRef)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid commit: %v", err))
+			return
+		}
+
+		// Get commit info
+		info, err := git.GetCommitInfo(repoRoot, sha)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("get commit info: %v", err))
+			return
+		}
+
+		// Get or create commit
+		commit, err := s.db.GetOrCreateCommit(repo.ID, sha, info.Author, info.Subject, info.Timestamp)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, fmt.Sprintf("get commit: %v", err))
+			return
+		}
+
+		job, err = s.db.EnqueueJob(repo.ID, commit.ID, sha, agentName)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, fmt.Sprintf("enqueue job: %v", err))
+			return
+		}
+		job.CommitSubject = commit.Subject
 	}
 
 	// Fill in joined fields
 	job.RepoPath = repo.RootPath
 	job.RepoName = repo.Name
-	job.CommitSHA = commit.SHA
-	job.CommitSubject = commit.Subject
 
 	writeJSON(w, http.StatusCreated, job)
 }

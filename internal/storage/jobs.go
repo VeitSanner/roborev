@@ -5,10 +5,10 @@ import (
 	"time"
 )
 
-// EnqueueJob creates a new review job
-func (db *DB) EnqueueJob(repoID, commitID int64, agent string) (*ReviewJob, error) {
-	result, err := db.Exec(`INSERT INTO review_jobs (repo_id, commit_id, agent, status) VALUES (?, ?, ?, 'queued')`,
-		repoID, commitID, agent)
+// EnqueueJob creates a new review job for a single commit
+func (db *DB) EnqueueJob(repoID, commitID int64, gitRef, agent string) (*ReviewJob, error) {
+	result, err := db.Exec(`INSERT INTO review_jobs (repo_id, commit_id, git_ref, agent, status) VALUES (?, ?, ?, ?, 'queued')`,
+		repoID, commitID, gitRef, agent)
 	if err != nil {
 		return nil, err
 	}
@@ -17,7 +17,28 @@ func (db *DB) EnqueueJob(repoID, commitID int64, agent string) (*ReviewJob, erro
 	return &ReviewJob{
 		ID:         id,
 		RepoID:     repoID,
-		CommitID:   commitID,
+		CommitID:   &commitID,
+		GitRef:     gitRef,
+		Agent:      agent,
+		Status:     JobStatusQueued,
+		EnqueuedAt: time.Now(),
+	}, nil
+}
+
+// EnqueueRangeJob creates a new review job for a commit range
+func (db *DB) EnqueueRangeJob(repoID int64, gitRef, agent string) (*ReviewJob, error) {
+	result, err := db.Exec(`INSERT INTO review_jobs (repo_id, commit_id, git_ref, agent, status) VALUES (?, NULL, ?, ?, 'queued')`,
+		repoID, gitRef, agent)
+	if err != nil {
+		return nil, err
+	}
+
+	id, _ := result.LastInsertId()
+	return &ReviewJob{
+		ID:         id,
+		RepoID:     repoID,
+		CommitID:   nil,
+		GitRef:     gitRef,
 		Agent:      agent,
 		Status:     JobStatusQueued,
 		EnqueuedAt: time.Now(),
@@ -35,17 +56,19 @@ func (db *DB) ClaimJob(workerID string) (*ReviewJob, error) {
 	// Find and lock the next queued job
 	var job ReviewJob
 	var enqueuedAt string
+	var commitID sql.NullInt64
+	var commitSubject sql.NullString
 	err = tx.QueryRow(`
-		SELECT j.id, j.repo_id, j.commit_id, j.agent, j.status, j.enqueued_at,
-		       r.root_path, r.name, c.sha, c.subject
+		SELECT j.id, j.repo_id, j.commit_id, j.git_ref, j.agent, j.status, j.enqueued_at,
+		       r.root_path, r.name, c.subject
 		FROM review_jobs j
 		JOIN repos r ON r.id = j.repo_id
-		JOIN commits c ON c.id = j.commit_id
+		LEFT JOIN commits c ON c.id = j.commit_id
 		WHERE j.status = 'queued'
 		ORDER BY j.enqueued_at
 		LIMIT 1
-	`).Scan(&job.ID, &job.RepoID, &job.CommitID, &job.Agent, &job.Status, &enqueuedAt,
-		&job.RepoPath, &job.RepoName, &job.CommitSHA, &job.CommitSubject)
+	`).Scan(&job.ID, &job.RepoID, &commitID, &job.GitRef, &job.Agent, &job.Status, &enqueuedAt,
+		&job.RepoPath, &job.RepoName, &commitSubject)
 	if err == sql.ErrNoRows {
 		return nil, nil // No jobs available
 	}
@@ -53,6 +76,12 @@ func (db *DB) ClaimJob(workerID string) (*ReviewJob, error) {
 		return nil, err
 	}
 
+	if commitID.Valid {
+		job.CommitID = &commitID.Int64
+	}
+	if commitSubject.Valid {
+		job.CommitSubject = commitSubject.String
+	}
 	job.EnqueuedAt, _ = time.Parse(time.RFC3339, enqueuedAt)
 
 	// Claim it
@@ -110,12 +139,12 @@ func (db *DB) FailJob(jobID int64, errorMsg string) error {
 // ListJobs returns jobs with optional status filter
 func (db *DB) ListJobs(statusFilter string, limit int) ([]ReviewJob, error) {
 	query := `
-		SELECT j.id, j.repo_id, j.commit_id, j.agent, j.status, j.enqueued_at,
+		SELECT j.id, j.repo_id, j.commit_id, j.git_ref, j.agent, j.status, j.enqueued_at,
 		       j.started_at, j.finished_at, j.worker_id, j.error,
-		       r.root_path, r.name, c.sha, c.subject
+		       r.root_path, r.name, c.subject
 		FROM review_jobs j
 		JOIN repos r ON r.id = j.repo_id
-		JOIN commits c ON c.id = j.commit_id
+		LEFT JOIN commits c ON c.id = j.commit_id
 	`
 	var args []interface{}
 
@@ -142,14 +171,22 @@ func (db *DB) ListJobs(statusFilter string, limit int) ([]ReviewJob, error) {
 		var j ReviewJob
 		var enqueuedAt string
 		var startedAt, finishedAt, workerID, errMsg sql.NullString
+		var commitID sql.NullInt64
+		var commitSubject sql.NullString
 
-		err := rows.Scan(&j.ID, &j.RepoID, &j.CommitID, &j.Agent, &j.Status, &enqueuedAt,
+		err := rows.Scan(&j.ID, &j.RepoID, &commitID, &j.GitRef, &j.Agent, &j.Status, &enqueuedAt,
 			&startedAt, &finishedAt, &workerID, &errMsg,
-			&j.RepoPath, &j.RepoName, &j.CommitSHA, &j.CommitSubject)
+			&j.RepoPath, &j.RepoName, &commitSubject)
 		if err != nil {
 			return nil, err
 		}
 
+		if commitID.Valid {
+			j.CommitID = &commitID.Int64
+		}
+		if commitSubject.Valid {
+			j.CommitSubject = commitSubject.String
+		}
 		j.EnqueuedAt, _ = time.Parse(time.RFC3339, enqueuedAt)
 		if startedAt.Valid {
 			t, _ := time.Parse(time.RFC3339, startedAt.String)
@@ -177,22 +214,30 @@ func (db *DB) GetJobByID(id int64) (*ReviewJob, error) {
 	var j ReviewJob
 	var enqueuedAt string
 	var startedAt, finishedAt, workerID, errMsg sql.NullString
+	var commitID sql.NullInt64
+	var commitSubject sql.NullString
 
 	err := db.QueryRow(`
-		SELECT j.id, j.repo_id, j.commit_id, j.agent, j.status, j.enqueued_at,
+		SELECT j.id, j.repo_id, j.commit_id, j.git_ref, j.agent, j.status, j.enqueued_at,
 		       j.started_at, j.finished_at, j.worker_id, j.error,
-		       r.root_path, r.name, c.sha, c.subject
+		       r.root_path, r.name, c.subject
 		FROM review_jobs j
 		JOIN repos r ON r.id = j.repo_id
-		JOIN commits c ON c.id = j.commit_id
+		LEFT JOIN commits c ON c.id = j.commit_id
 		WHERE j.id = ?
-	`, id).Scan(&j.ID, &j.RepoID, &j.CommitID, &j.Agent, &j.Status, &enqueuedAt,
+	`, id).Scan(&j.ID, &j.RepoID, &commitID, &j.GitRef, &j.Agent, &j.Status, &enqueuedAt,
 		&startedAt, &finishedAt, &workerID, &errMsg,
-		&j.RepoPath, &j.RepoName, &j.CommitSHA, &j.CommitSubject)
+		&j.RepoPath, &j.RepoName, &commitSubject)
 	if err != nil {
 		return nil, err
 	}
 
+	if commitID.Valid {
+		j.CommitID = &commitID.Int64
+	}
+	if commitSubject.Valid {
+		j.CommitSubject = commitSubject.String
+	}
 	j.EnqueuedAt, _ = time.Parse(time.RFC3339, enqueuedAt)
 	if startedAt.Valid {
 		t, _ := time.Parse(time.RFC3339, startedAt.String)

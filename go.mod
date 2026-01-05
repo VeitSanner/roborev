@@ -1,4 +1,4 @@
-module github.com/user/roborev
+module github.com/wesm/roborev
 
 go 1.24.0
 

@@ -156,3 +156,62 @@ func GetParentCommits(repoPath, sha string, count int) ([]string, error) {
 
 	return commits, nil
 }
+
+// IsRange returns true if the ref is a range (contains "..")
+func IsRange(ref string) bool {
+	return strings.Contains(ref, "..")
+}
+
+// ParseRange splits a range ref into start and end
+func ParseRange(ref string) (start, end string, ok bool) {
+	parts := strings.SplitN(ref, "..", 2)
+	if len(parts) != 2 {
+		return "", "", false
+	}
+	return parts[0], parts[1], true
+}
+
+// GetRangeCommits returns all commits in a range (oldest first)
+func GetRangeCommits(repoPath, rangeRef string) ([]string, error) {
+	cmd := exec.Command("git", "log", "--format=%H", "--reverse", rangeRef)
+	cmd.Dir = repoPath
+
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("git log range: %w", err)
+	}
+
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	var commits []string
+	for _, line := range lines {
+		if line != "" {
+			commits = append(commits, line)
+		}
+	}
+
+	return commits, nil
+}
+
+// GetRangeDiff returns the combined diff for a range
+func GetRangeDiff(repoPath, rangeRef string) (string, error) {
+	cmd := exec.Command("git", "diff", rangeRef)
+	cmd.Dir = repoPath
+
+	out, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("git diff range: %w", err)
+	}
+
+	return string(out), nil
+}
+
+// GetRangeStart returns the start commit (first parent before range) for context lookup
+func GetRangeStart(repoPath, rangeRef string) (string, error) {
+	start, _, ok := ParseRange(rangeRef)
+	if !ok {
+		return "", fmt.Errorf("invalid range: %s", rangeRef)
+	}
+
+	// Resolve the start ref
+	return ResolveSHA(repoPath, start)
+}

@@ -30,7 +30,8 @@ CREATE TABLE IF NOT EXISTS commits (
 CREATE TABLE IF NOT EXISTS review_jobs (
   id INTEGER PRIMARY KEY,
   repo_id INTEGER NOT NULL REFERENCES repos(id),
-  commit_id INTEGER NOT NULL REFERENCES commits(id),
+  commit_id INTEGER REFERENCES commits(id),
+  git_ref TEXT NOT NULL,
   agent TEXT NOT NULL DEFAULT 'codex',
   status TEXT NOT NULL CHECK(status IN ('queued','running','done','failed')) DEFAULT 'queued',
   enqueued_at TEXT NOT NULL DEFAULT (datetime('now')),
@@ -59,6 +60,7 @@ CREATE TABLE IF NOT EXISTS responses (
 
 CREATE INDEX IF NOT EXISTS idx_review_jobs_status ON review_jobs(status);
 CREATE INDEX IF NOT EXISTS idx_review_jobs_repo ON review_jobs(repo_id);
+CREATE INDEX IF NOT EXISTS idx_review_jobs_git_ref ON review_jobs(git_ref);
 CREATE INDEX IF NOT EXISTS idx_commits_sha ON commits(sha);
 `
 

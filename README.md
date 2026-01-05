@@ -42,6 +42,16 @@ roborev respond HEAD # Add response to a review
 roborev tui          # Interactive terminal UI
 ```
 
+### Reviewing Commit Ranges
+
+Review multiple commits at once:
+
+```bash
+roborev enqueue abc123 def456   # Review commits from abc123 to def456 (inclusive)
+```
+
+The range is inclusive of both endpoints. This is useful for reviewing a feature branch or a set of related commits together.
+
 ## Configuration
 
 Per-repository `.roborev.toml`:
@@ -91,9 +101,11 @@ Agent selection priority:
 | `roborev status` | Show daemon and queue status |
 | `roborev show [sha]` | Display review |
 | `roborev respond <sha>` | Add response |
-| `roborev enqueue` | Manually enqueue a commit |
+| `roborev enqueue [commit]` | Enqueue a single commit for review |
+| `roborev enqueue <start> <end>` | Enqueue a commit range for review |
 | `roborev daemon start\|stop\|restart` | Manage daemon |
 | `roborev install-hook` | Install git hook only |
+| `roborev tui` | Interactive terminal UI |
 
 ## Development
 
