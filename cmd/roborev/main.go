@@ -138,9 +138,23 @@ func restartDaemon() error {
 	if runtime.GOOS == "windows" {
 		exec.Command("taskkill", "/IM", "roborevd.exe", "/F").Run()
 	} else {
-		exec.Command("pkill", "-f", "roborevd").Run()
+		// Send SIGTERM first for graceful shutdown
+		exec.Command("pkill", "-TERM", "-f", "roborevd").Run()
+		time.Sleep(500 * time.Millisecond)
+		// Then SIGKILL to ensure it's dead
+		exec.Command("pkill", "-KILL", "-f", "roborevd").Run()
 	}
 	time.Sleep(500 * time.Millisecond)
+
+	// Checkpoint WAL to ensure clean state for new daemon
+	if dbPath := storage.DefaultDBPath(); dbPath != "" {
+		db, err := storage.Open(dbPath)
+		if err == nil {
+			db.Exec("PRAGMA wal_checkpoint(TRUNCATE)")
+			db.Close()
+		}
+	}
+
 	return startDaemon()
 }
 
