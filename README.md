@@ -62,12 +62,12 @@ Per-repository `.roborev.toml`:
 agent = "claude-code"    # or "codex"
 review_context_count = 5
 
-# Project-specific review guidelines
-review_guidelines = [
-    "We are not doing database migrations because there are no production databases yet",
-    "Prefer composition over inheritance",
-    "All public APIs must have documentation comments"
-]
+# Project-specific review guidelines (multi-line string)
+review_guidelines = """
+We are not doing database migrations because there are no production databases yet.
+Prefer composition over inheritance.
+All public APIs must have documentation comments.
+"""
 ```
 
 ### Review Guidelines
@@ -78,7 +78,11 @@ Use `review_guidelines` to provide project-specific context to the AI reviewer. 
 - Enforce project conventions (e.g., "use tabs not spaces")
 - Add domain-specific review criteria (e.g., "check for PII exposure")
 
-Guidelines are formatted as bullet points in the review prompt and appear before the code diff.
+Guidelines appear verbatim in the review prompt before the code diff. Use TOML's triple-quote syntax (`"""`) for multi-line guidelines.
+
+### Large Diffs
+
+If the review prompt exceeds 250KB (including the diff), roborev omits the diff and instead provides just the commit hash(es). The AI agent can then inspect the changes using its own tools (e.g., `git show <sha>`).
 
 Global `~/.roborev/config.toml`:
 

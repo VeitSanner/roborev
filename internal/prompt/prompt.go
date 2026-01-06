@@ -262,20 +262,15 @@ func (b *Builder) writePreviousReviews(sb *strings.Builder, contexts []ReviewCon
 }
 
 // writeProjectGuidelines writes the project-specific guidelines section
-func (b *Builder) writeProjectGuidelines(sb *strings.Builder, guidelines []string) {
-	if len(guidelines) == 0 {
+func (b *Builder) writeProjectGuidelines(sb *strings.Builder, guidelines string) {
+	if guidelines == "" {
 		return
 	}
 
 	sb.WriteString(ProjectGuidelinesHeader)
 	sb.WriteString("\n")
-
-	for _, guideline := range guidelines {
-		sb.WriteString("- ")
-		sb.WriteString(guideline)
-		sb.WriteString("\n")
-	}
-	sb.WriteString("\n")
+	sb.WriteString(strings.TrimSpace(guidelines))
+	sb.WriteString("\n\n")
 }
 
 // getPreviousReviewContexts gets the N commits before the target and looks up their reviews

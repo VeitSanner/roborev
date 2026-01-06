@@ -21,9 +21,9 @@ type Config struct {
 
 // RepoConfig holds per-repo overrides
 type RepoConfig struct {
-	Agent              string   `toml:"agent"`
-	ReviewContextCount int      `toml:"review_context_count"`
-	ReviewGuidelines   []string `toml:"review_guidelines"`
+	Agent              string `toml:"agent"`
+	ReviewContextCount int    `toml:"review_context_count"`
+	ReviewGuidelines   string `toml:"review_guidelines"`
 }
 
 // DefaultConfig returns the default configuration

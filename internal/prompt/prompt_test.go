@@ -293,14 +293,14 @@ func TestBuildPromptWithProjectGuidelines(t *testing.T) {
 	repoPath, commits := setupTestRepo(t)
 	targetSHA := commits[len(commits)-1]
 
-	// Create .roborev.toml with review guidelines
+	// Create .roborev.toml with review guidelines as multi-line string
 	configContent := `
 agent = "codex"
-review_guidelines = [
-    "We are not doing database migrations because there are no production databases yet",
-    "Prefer composition over inheritance",
-    "All public APIs must have documentation comments"
-]
+review_guidelines = """
+We are not doing database migrations because there are no production databases yet.
+Prefer composition over inheritance.
+All public APIs must have documentation comments.
+"""
 `
 	configPath := filepath.Join(repoPath, ".roborev.toml")
 	if err := os.WriteFile(configPath, []byte(configContent), 0644); err != nil {
@@ -318,21 +318,15 @@ review_guidelines = [
 		t.Error("Prompt should contain project guidelines section")
 	}
 
-	// Should contain each guideline
-	expectedGuidelines := []string{
-		"We are not doing database migrations because there are no production databases yet",
-		"Prefer composition over inheritance",
-		"All public APIs must have documentation comments",
+	// Should contain the guidelines text
+	if !strings.Contains(prompt, "database migrations") {
+		t.Error("Prompt should contain guidelines about database migrations")
 	}
-	for _, guideline := range expectedGuidelines {
-		if !strings.Contains(prompt, guideline) {
-			t.Errorf("Prompt should contain guideline: %s", guideline)
-		}
+	if !strings.Contains(prompt, "composition over inheritance") {
+		t.Error("Prompt should contain guidelines about composition")
 	}
-
-	// Guidelines should appear as bullet points
-	if !strings.Contains(prompt, "- We are not doing") {
-		t.Error("Guidelines should be formatted as bullet points")
+	if !strings.Contains(prompt, "documentation comments") {
+		t.Error("Prompt should contain guidelines about documentation")
 	}
 
 	// Print prompt for inspection
@@ -393,9 +387,7 @@ func TestBuildPromptGuidelinesOrder(t *testing.T) {
 	targetSHA := commits[len(commits)-1]
 
 	// Create .roborev.toml with review guidelines
-	configContent := `
-review_guidelines = ["Test guideline"]
-`
+	configContent := `review_guidelines = "Test guideline"`
 	configPath := filepath.Join(repoPath, ".roborev.toml")
 	if err := os.WriteFile(configPath, []byte(configContent), 0644); err != nil {
 		t.Fatalf("Failed to write config: %v", err)
