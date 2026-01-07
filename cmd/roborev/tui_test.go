@@ -188,6 +188,12 @@ func TestTUIToggleAddressedNoReview(t *testing.T) {
 	}
 }
 
+// addressRequest is used to decode and validate POST body in tests
+type addressRequest struct {
+	ReviewID  int64 `json:"review_id"`
+	Addressed bool  `json:"addressed"`
+}
+
 func TestTUIAddressReviewInBackgroundSuccess(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
@@ -198,13 +204,15 @@ func TestTUIAddressReviewInBackgroundSuccess(t *testing.T) {
 			review := storage.Review{ID: 10, Addressed: false}
 			json.NewEncoder(w).Encode(review)
 		case r.URL.Path == "/api/review/address" && r.Method == http.MethodPost:
-			var req map[string]interface{}
-			json.NewDecoder(r.Body).Decode(&req)
-			if req["review_id"].(float64) != 10 {
-				t.Errorf("Expected review_id=10, got %v", req["review_id"])
+			var req addressRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				t.Fatalf("Failed to decode request body: %v", err)
 			}
-			if req["addressed"].(bool) != true {
-				t.Errorf("Expected addressed=true, got %v", req["addressed"])
+			if req.ReviewID != 10 {
+				t.Errorf("Expected review_id=10, got %d", req.ReviewID)
+			}
+			if req.Addressed != true {
+				t.Errorf("Expected addressed=true, got %v", req.Addressed)
 			}
 			json.NewEncoder(w).Encode(map[string]bool{"success": true})
 		default:
@@ -232,6 +240,10 @@ func TestTUIAddressReviewInBackgroundSuccess(t *testing.T) {
 	}
 	if result.reviewView {
 		t.Error("Expected reviewView=false for queue view command")
+	}
+	// reviewID is intentionally 0 for queue view commands (only jobID is set)
+	if result.reviewID != 0 {
+		t.Errorf("Expected reviewID=0 for queue view, got %d", result.reviewID)
 	}
 }
 
@@ -320,6 +332,17 @@ func TestTUIAddressReviewInBackgroundAddressError(t *testing.T) {
 			review := storage.Review{ID: 10, Addressed: false}
 			json.NewEncoder(w).Encode(review)
 		case r.URL.Path == "/api/review/address" && r.Method == http.MethodPost:
+			// Validate request body before returning error
+			var req addressRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				t.Fatalf("Failed to decode request body: %v", err)
+			}
+			if req.ReviewID != 10 {
+				t.Errorf("Expected review_id=10, got %d", req.ReviewID)
+			}
+			if req.Addressed != true {
+				t.Errorf("Expected addressed=true, got %v", req.Addressed)
+			}
 			w.WriteHeader(http.StatusInternalServerError)
 		default:
 			t.Fatalf("Unexpected request: %s %s", r.Method, r.URL.Path)
