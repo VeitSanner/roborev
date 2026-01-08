@@ -29,14 +29,16 @@ func TestGetHooksPath(t *testing.T) {
 			t.Errorf("hooks path should be absolute, got: %s", hooksPath)
 		}
 
-		// Should end with .git/hooks (or .git\hooks on Windows)
+		// Should end with .git/hooks (normalize for cross-platform)
+		cleanPath := filepath.Clean(hooksPath)
 		expectedSuffix := filepath.Join(".git", "hooks")
-		if !strings.HasSuffix(hooksPath, expectedSuffix) {
-			t.Errorf("hooks path should end with %s, got: %s", expectedSuffix, hooksPath)
+		if !strings.HasSuffix(cleanPath, expectedSuffix) {
+			t.Errorf("hooks path should end with %s, got: %s", expectedSuffix, cleanPath)
 		}
 
-		// Should be under tmpDir
-		if !strings.HasPrefix(hooksPath, tmpDir) {
+		// Should be under tmpDir (use filepath.Rel for robust check)
+		rel, err := filepath.Rel(tmpDir, hooksPath)
+		if err != nil || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || rel == ".." {
 			t.Errorf("hooks path should be under %s, got: %s", tmpDir, hooksPath)
 		}
 	})
