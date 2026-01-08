@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -214,4 +215,24 @@ func GetRangeStart(repoPath, rangeRef string) (string, error) {
 
 	// Resolve the start ref
 	return ResolveSHA(repoPath, start)
+}
+
+// GetHooksPath returns the path to the hooks directory, respecting core.hooksPath
+func GetHooksPath(repoPath string) (string, error) {
+	cmd := exec.Command("git", "rev-parse", "--git-path", "hooks")
+	cmd.Dir = repoPath
+
+	out, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("git rev-parse --git-path hooks: %w", err)
+	}
+
+	hooksPath := strings.TrimSpace(string(out))
+
+	// If the path is relative, make it absolute relative to repoPath
+	if !strings.HasPrefix(hooksPath, "/") {
+		hooksPath = filepath.Join(repoPath, hooksPath)
+	}
+
+	return hooksPath, nil
 }

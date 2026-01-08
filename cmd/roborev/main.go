@@ -255,13 +255,16 @@ func initCmd() *cobra.Command {
 			}
 
 			// 4. Install post-commit hook
-			hookPath := filepath.Join(root, ".git", "hooks", "post-commit")
+			hooksDir, err := git.GetHooksPath(root)
+			if err != nil {
+				return fmt.Errorf("get hooks path: %w", err)
+			}
+			hookPath := filepath.Join(hooksDir, "post-commit")
 			hookContent := `#!/bin/sh
 # RoboRev post-commit hook - auto-reviews every commit
 roborev enqueue --sha HEAD 2>/dev/null &
 `
 			// Ensure hooks directory exists
-			hooksDir := filepath.Join(root, ".git", "hooks")
 			if err := os.MkdirAll(hooksDir, 0755); err != nil {
 				return fmt.Errorf("create hooks directory: %w", err)
 			}
@@ -705,7 +708,11 @@ func installHookCmd() *cobra.Command {
 				return fmt.Errorf("not a git repository: %w", err)
 			}
 
-			hookPath := filepath.Join(root, ".git", "hooks", "post-commit")
+			hooksDir, err := git.GetHooksPath(root)
+			if err != nil {
+				return fmt.Errorf("get hooks path: %w", err)
+			}
+			hookPath := filepath.Join(hooksDir, "post-commit")
 
 			// Check if hook already exists
 			if _, err := os.Stat(hookPath); err == nil && !force {
@@ -713,7 +720,6 @@ func installHookCmd() *cobra.Command {
 			}
 
 			// Ensure hooks directory exists
-			hooksDir := filepath.Join(root, ".git", "hooks")
 			if err := os.MkdirAll(hooksDir, 0755); err != nil {
 				return fmt.Errorf("create hooks directory: %w", err)
 			}
@@ -747,7 +753,11 @@ func uninstallHookCmd() *cobra.Command {
 				return fmt.Errorf("not a git repository: %w", err)
 			}
 
-			hookPath := filepath.Join(root, ".git", "hooks", "post-commit")
+			hooksDir, err := git.GetHooksPath(root)
+			if err != nil {
+				return fmt.Errorf("get hooks path: %w", err)
+			}
+			hookPath := filepath.Join(hooksDir, "post-commit")
 
 			// Check if hook exists
 			content, err := os.ReadFile(hookPath)

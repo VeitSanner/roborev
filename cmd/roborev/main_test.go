@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -308,6 +309,10 @@ func TestUninstallHookCmd(t *testing.T) {
 }
 
 func TestInitCmdCreatesHooksDirectory(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test uses shell script stub, skipping on Windows")
+	}
+
 	// Override HOME to prevent reading real daemon.json
 	tmpHome := t.TempDir()
 	origHome := os.Getenv("HOME")
@@ -396,6 +401,10 @@ func TestInitCmdCreatesHooksDirectory(t *testing.T) {
 }
 
 func TestInstallHookCmdCreatesHooksDirectory(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test checks Unix exec bits, skipping on Windows")
+	}
+
 	// Test that install-hook creates .git/hooks directory if missing
 	tmpDir := t.TempDir()
 
