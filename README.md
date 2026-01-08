@@ -101,7 +101,7 @@ When a diff exceeds 250KB, roborev omits it from the prompt and provides only th
 | `codex` | `codex` | `npm install -g @openai/codex` |
 | `claude-code` | `claude` | `npm install -g @anthropic-ai/claude-code` |
 | `gemini` | `gemini` | `npm install -g @google/gemini-cli` |
-| `copilot` | `github-copilot-cli` | `npm install -g @github/copilot` |
+| `copilot` | `copilot` | `npm install -g @github/copilot` |
 | `opencode` | `opencode` | `npm install -g opencode-ai` |
 
 roborev auto-detects installed agents and falls back in order: codex → claude-code → gemini → copilot → opencode.
