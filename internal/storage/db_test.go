@@ -516,6 +516,12 @@ func TestCancelJob(t *testing.T) {
 		if updated.Status != JobStatusCanceled {
 			t.Errorf("CompleteJob should not overwrite canceled status, got '%s'", updated.Status)
 		}
+
+		// Verify no review was inserted
+		_, err := db.GetReviewByJobID(job.ID)
+		if err == nil {
+			t.Error("No review should be inserted for canceled job")
+		}
 	})
 
 	t.Run("fail respects canceled status", func(t *testing.T) {
