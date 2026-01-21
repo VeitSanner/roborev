@@ -9,6 +9,7 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/wesm/roborev/internal/agent"
@@ -25,6 +26,13 @@ type Server struct {
 	broadcaster Broadcaster
 	workerPool  *WorkerPool
 	httpServer  *http.Server
+	syncWorker  *storage.SyncWorker
+	errorLog    *ErrorLog
+	startTime   time.Time
+
+	// Cached machine ID to avoid INSERT on every status request
+	machineIDMu sync.Mutex
+	machineID   string
 }
 
 // NewServer creates a new daemon server
@@ -33,15 +41,25 @@ func NewServer(db *storage.DB, cfg *config.Config) *Server {
 	agent.SetAllowUnsafeAgents(cfg.AllowUnsafeAgents != nil && *cfg.AllowUnsafeAgents)
 	agent.SetAnthropicAPIKey(cfg.AnthropicAPIKey)
 	broadcaster := NewBroadcaster()
+
+	// Initialize error log
+	errorLog, err := NewErrorLog(DefaultErrorLogPath())
+	if err != nil {
+		log.Printf("Warning: failed to create error log: %v", err)
+	}
+
 	s := &Server{
 		db:          db,
 		cfg:         cfg,
 		broadcaster: broadcaster,
-		workerPool:  NewWorkerPool(db, cfg, cfg.MaxWorkers, broadcaster),
+		workerPool:  NewWorkerPool(db, cfg, cfg.MaxWorkers, broadcaster, errorLog),
+		errorLog:    errorLog,
+		startTime:   time.Now(),
 	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/enqueue", s.handleEnqueue)
+	mux.HandleFunc("/api/health", s.handleHealth)
 	mux.HandleFunc("/api/jobs", s.handleListJobs)
 	mux.HandleFunc("/api/job/cancel", s.handleCancelJob)
 	mux.HandleFunc("/api/job/rerun", s.handleRerunJob)
@@ -52,6 +70,7 @@ func NewServer(db *storage.DB, cfg *config.Config) *Server {
 	mux.HandleFunc("/api/responses", s.handleListResponses)
 	mux.HandleFunc("/api/status", s.handleStatus)
 	mux.HandleFunc("/api/stream/events", s.handleStreamEvents)
+	mux.HandleFunc("/api/sync/now", s.handleSyncNow)
 
 	s.httpServer = &http.Server{
 		Addr:    cfg.ServerAddr,
@@ -107,7 +126,112 @@ func (s *Server) Stop() error {
 	// Stop worker pool
 	s.workerPool.Stop()
 
+	// Close error log
+	if s.errorLog != nil {
+		s.errorLog.Close()
+	}
+
 	return nil
+}
+
+// SetSyncWorker sets the sync worker for triggering manual syncs
+func (s *Server) SetSyncWorker(sw *storage.SyncWorker) {
+	s.syncWorker = sw
+}
+
+// handleSyncNow triggers an immediate sync cycle
+func (s *Server) handleSyncNow(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if s.syncWorker == nil {
+		http.Error(w, "Sync not enabled", http.StatusNotFound)
+		return
+	}
+
+	// Check if client wants streaming progress
+	stream := r.URL.Query().Get("stream") == "1"
+
+	if stream {
+		// Stream progress as newline-delimited JSON
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			http.Error(w, "Streaming not supported", http.StatusInternalServerError)
+			return
+		}
+
+		stats, err := s.syncWorker.SyncNowWithProgress(func(p storage.SyncProgress) {
+			line, _ := json.Marshal(map[string]interface{}{
+				"type":        "progress",
+				"phase":       p.Phase,
+				"batch":       p.BatchNum,
+				"batch_jobs":  p.BatchJobs,
+				"batch_revs":  p.BatchRevs,
+				"batch_resps": p.BatchResps,
+				"total_jobs":  p.TotalJobs,
+				"total_revs":  p.TotalRevs,
+				"total_resps": p.TotalResps,
+			})
+			w.Write(line)
+			w.Write([]byte("\n"))
+			flusher.Flush()
+		})
+
+		if err != nil {
+			line, _ := json.Marshal(map[string]interface{}{
+				"type":  "error",
+				"error": err.Error(),
+			})
+			w.Write(line)
+			w.Write([]byte("\n"))
+			return
+		}
+
+		// Final result
+		line, _ := json.Marshal(map[string]interface{}{
+			"type":    "complete",
+			"message": "Sync completed",
+			"pushed": map[string]int{
+				"jobs":      stats.PushedJobs,
+				"reviews":   stats.PushedReviews,
+				"responses": stats.PushedResponses,
+			},
+			"pulled": map[string]int{
+				"jobs":      stats.PulledJobs,
+				"reviews":   stats.PulledReviews,
+				"responses": stats.PulledResponses,
+			},
+		})
+		w.Write(line)
+		w.Write([]byte("\n"))
+		return
+	}
+
+	// Non-streaming: wait for completion
+	stats, err := s.syncWorker.SyncNow()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"message": "Sync completed",
+		"pushed": map[string]int{
+			"jobs":      stats.PushedJobs,
+			"reviews":   stats.PushedReviews,
+			"responses": stats.PushedResponses,
+		},
+		"pulled": map[string]int{
+			"jobs":      stats.PulledJobs,
+			"reviews":   stats.PulledReviews,
+			"responses": stats.PulledResponses,
+		},
+	})
 }
 
 // API request/response types
@@ -135,6 +259,14 @@ func writeJSON(w http.ResponseWriter, status int, v interface{}) {
 
 func writeError(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, ErrorResponse{Error: msg})
+}
+
+// writeInternalError writes an internal error response and logs it
+func (s *Server) writeInternalError(w http.ResponseWriter, msg string) {
+	writeError(w, http.StatusInternalServerError, msg)
+	if s.errorLog != nil {
+		s.errorLog.LogError("server", msg, 0)
+	}
 }
 
 func (s *Server) handleEnqueue(w http.ResponseWriter, r *http.Request) {
@@ -198,10 +330,13 @@ func (s *Server) handleEnqueue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Get or create repo (uses main repo root for identity)
-	repo, err := s.db.GetOrCreateRepo(repoRoot)
+	// Resolve repo identity for sync
+	repoIdentity := config.ResolveRepoIdentity(repoRoot, nil)
+
+	// Get or create repo with identity
+	repo, err := s.db.GetOrCreateRepo(repoRoot, repoIdentity)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, fmt.Sprintf("get repo: %v", err))
+		s.writeInternalError(w, fmt.Sprintf("get repo: %v", err))
 		return
 	}
 
@@ -382,7 +517,7 @@ func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 
 	jobs, err := s.db.ListJobs(status, repo, fetchLimit, offset, gitRef)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, fmt.Sprintf("list jobs: %v", err))
+		s.writeInternalError(w, fmt.Sprintf("list jobs: %v", err))
 		return
 	}
 
@@ -616,6 +751,23 @@ func (s *Server) handleListResponses(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]interface{}{"responses": responses})
 }
 
+// getMachineID returns the cached machine ID, fetching it on first successful call.
+// Retries on each call until successful to handle transient DB errors.
+func (s *Server) getMachineID() string {
+	s.machineIDMu.Lock()
+	defer s.machineIDMu.Unlock()
+
+	if s.machineID != "" {
+		return s.machineID
+	}
+
+	// Try to fetch - only cache on success
+	if id, err := s.db.GetMachineID(); err == nil && id != "" {
+		s.machineID = id
+	}
+	return s.machineID
+}
+
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -624,7 +776,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 
 	queued, running, done, failed, canceled, err := s.db.GetJobCounts()
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, fmt.Sprintf("get counts: %v", err))
+		s.writeInternalError(w, fmt.Sprintf("get counts: %v", err))
 		return
 	}
 
@@ -637,6 +789,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		CanceledJobs:  canceled,
 		ActiveWorkers: s.workerPool.ActiveWorkers(),
 		MaxWorkers:    s.cfg.MaxWorkers,
+		MachineID:     s.getMachineID(),
 	}
 
 	writeJSON(w, http.StatusOK, status)
@@ -719,4 +872,110 @@ func (s *Server) handleStreamEvents(w http.ResponseWriter, r *http.Request) {
 			flusher.Flush()
 		}
 	}
+}
+
+func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	// Calculate uptime
+	uptime := time.Since(s.startTime)
+	uptimeStr := formatDuration(uptime)
+
+	// Check component health
+	var components []storage.ComponentHealth
+	allHealthy := true
+
+	// Database health check
+	dbHealthy := true
+	dbMessage := ""
+	if err := s.db.Ping(); err != nil {
+		dbHealthy = false
+		dbMessage = err.Error()
+		allHealthy = false
+	}
+	components = append(components, storage.ComponentHealth{
+		Name:    "database",
+		Healthy: dbHealthy,
+		Message: dbMessage,
+	})
+
+	// Worker health check - look for stalled jobs (running > 30 min)
+	workersHealthy := true
+	workersMessage := ""
+	stalledCount, err := s.db.CountStalledJobs(30 * time.Minute)
+	if err != nil {
+		workersHealthy = false
+		workersMessage = fmt.Sprintf("error checking stalled jobs: %v", err)
+		allHealthy = false
+	} else if stalledCount > 0 {
+		workersHealthy = false
+		workersMessage = fmt.Sprintf("%d stalled job(s) running > 30 min", stalledCount)
+		allHealthy = false
+	}
+	components = append(components, storage.ComponentHealth{
+		Name:    "workers",
+		Healthy: workersHealthy,
+		Message: workersMessage,
+	})
+
+	// Sync health check (if configured)
+	if s.syncWorker != nil {
+		syncHealthy, syncMessage := s.syncWorker.HealthCheck()
+		if !syncHealthy {
+			allHealthy = false
+		}
+		components = append(components, storage.ComponentHealth{
+			Name:    "sync",
+			Healthy: syncHealthy,
+			Message: syncMessage,
+		})
+	}
+
+	// Get recent errors
+	var recentErrors []storage.ErrorEntry
+	var errorCount24h int
+	if s.errorLog != nil {
+		for _, e := range s.errorLog.RecentN(10) {
+			recentErrors = append(recentErrors, storage.ErrorEntry{
+				Timestamp: e.Timestamp,
+				Level:     e.Level,
+				Component: e.Component,
+				Message:   e.Message,
+				JobID:     e.JobID,
+			})
+		}
+		errorCount24h = s.errorLog.Count24h()
+	}
+
+	status := storage.HealthStatus{
+		Healthy:      allHealthy,
+		Uptime:       uptimeStr,
+		Version:      version.Version,
+		Components:   components,
+		RecentErrors: recentErrors,
+		ErrorCount:   errorCount24h,
+	}
+
+	writeJSON(w, http.StatusOK, status)
+}
+
+// formatDuration formats a duration in human-readable form (e.g., "2h 15m")
+func formatDuration(d time.Duration) string {
+	d = d.Round(time.Second)
+	h := d / time.Hour
+	d -= h * time.Hour
+	m := d / time.Minute
+	d -= m * time.Minute
+	s := d / time.Second
+
+	if h > 0 {
+		return fmt.Sprintf("%dh %dm", h, m)
+	}
+	if m > 0 {
+		return fmt.Sprintf("%dm %ds", m, s)
+	}
+	return fmt.Sprintf("%ds", s)
 }

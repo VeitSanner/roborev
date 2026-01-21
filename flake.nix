@@ -19,9 +19,9 @@
 
             src = ./.;
 
-            vendorHash = "sha256-YTLqKBSyhwIg2fy4RykkLwY5L9MFpT4yiPj3RWQv5hA=";
+            vendorHash = "sha256-d+z2isDa3wQhwM3glu2T2zl/z6yjAxa4Of3kZTXgkJQ=";
 
-            subPackages = [ "cmd/roborev" "cmd/roborevd" ];
+            subPackages = [ "cmd/roborev" ];
 
             nativeCheckInputs = [ pkgs.git ];
 
@@ -40,10 +40,6 @@
             exePath = "/bin/roborev";
           };
           roborev = self.apps.${system}.default;
-          roborevd = flake-utils.lib.mkApp {
-            drv = self.packages.${system}.default;
-            exePath = "/bin/roborevd";
-          };
         };
 
         formatter = pkgs.nixfmt;

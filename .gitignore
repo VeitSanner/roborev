@@ -1,6 +1,5 @@
 # Binaries (in root directory only)
 /roborev
-/roborevd
 *.exe
 /dist/
 
@@ -30,3 +29,4 @@ Thumbs.db
 .cache
 .gomodcache/
 .gopath/
+result

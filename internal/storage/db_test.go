@@ -442,6 +442,76 @@ func TestJobCounts(t *testing.T) {
 	_ = job
 }
 
+func TestCountStalledJobs(t *testing.T) {
+	db := openTestDB(t)
+	defer db.Close()
+
+	repo, _ := db.GetOrCreateRepo("/tmp/test-repo")
+
+	// Create a job and claim it (makes it running with current timestamp)
+	commit1, _ := db.GetOrCreateCommit(repo.ID, "recent1", "A", "S", time.Now())
+	db.EnqueueJob(repo.ID, commit1.ID, "recent1", "codex", "")
+	_, _ = db.ClaimJob("worker-1")
+
+	// No stalled jobs yet (just started)
+	count, err := db.CountStalledJobs(30 * time.Minute)
+	if err != nil {
+		t.Fatalf("CountStalledJobs failed: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("Expected 0 stalled jobs for recently started job, got %d", count)
+	}
+
+	// Create a job and manually set started_at to 1 hour ago (simulating stalled job)
+	// Use UTC format (ends with Z) to test basic case
+	commit2, _ := db.GetOrCreateCommit(repo.ID, "stalled1", "A", "S", time.Now())
+	job2, _ := db.EnqueueJob(repo.ID, commit2.ID, "stalled1", "codex", "")
+	oldTimeUTC := time.Now().Add(-1 * time.Hour).UTC().Format(time.RFC3339)
+	_, err = db.Exec(`UPDATE review_jobs SET status = 'running', started_at = ? WHERE id = ?`, oldTimeUTC, job2.ID)
+	if err != nil {
+		t.Fatalf("Failed to update job: %v", err)
+	}
+
+	// Now we should have 1 stalled job (running > 30 min)
+	count, err = db.CountStalledJobs(30 * time.Minute)
+	if err != nil {
+		t.Fatalf("CountStalledJobs failed: %v", err)
+	}
+	if count != 1 {
+		t.Errorf("Expected 1 stalled job for job started 1 hour ago (UTC), got %d", count)
+	}
+
+	// Create another stalled job with a non-UTC timezone offset to verify datetime() handles offsets
+	// This exercises the fix for RFC3339 timestamps with timezone offsets like "-07:00"
+	commit3, _ := db.GetOrCreateCommit(repo.ID, "stalled2", "A", "S", time.Now())
+	job3, _ := db.EnqueueJob(repo.ID, commit3.ID, "stalled2", "codex", "")
+	// Use a fixed timezone offset (e.g., UTC-7) instead of UTC
+	tzMinus7 := time.FixedZone("UTC-7", -7*60*60)
+	oldTimeWithOffset := time.Now().Add(-1 * time.Hour).In(tzMinus7).Format(time.RFC3339)
+	_, err = db.Exec(`UPDATE review_jobs SET status = 'running', started_at = ? WHERE id = ?`, oldTimeWithOffset, job3.ID)
+	if err != nil {
+		t.Fatalf("Failed to update job with timezone offset: %v", err)
+	}
+
+	// Should now have 2 stalled jobs - verifies datetime() parses both Z and offset formats
+	count, err = db.CountStalledJobs(30 * time.Minute)
+	if err != nil {
+		t.Fatalf("CountStalledJobs failed: %v", err)
+	}
+	if count != 2 {
+		t.Errorf("Expected 2 stalled jobs (UTC and offset timestamp), got %d", count)
+	}
+
+	// With a longer threshold (2 hours), neither job should be considered stalled
+	count, err = db.CountStalledJobs(2 * time.Hour)
+	if err != nil {
+		t.Fatalf("CountStalledJobs failed: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("Expected 0 stalled jobs with 2 hour threshold, got %d", count)
+	}
+}
+
 func TestRetryJob(t *testing.T) {
 	db := openTestDB(t)
 	defer db.Close()
@@ -1766,6 +1836,154 @@ func TestListJobsAndGetJobByIDReturnAgentic(t *testing.T) {
 		}
 		if !found {
 			t.Errorf("Non-agentic job %d not found in ListJobs result", nonAgenticJob.ID)
+		}
+	})
+}
+
+func TestRepoIdentity(t *testing.T) {
+	t.Run("sets identity on create", func(t *testing.T) {
+		db := openTestDB(t)
+		defer db.Close()
+
+		repo, err := db.GetOrCreateRepo("/tmp/identity-test", "git@github.com:foo/bar.git")
+		if err != nil {
+			t.Fatalf("GetOrCreateRepo failed: %v", err)
+		}
+
+		if repo.Identity != "git@github.com:foo/bar.git" {
+			t.Errorf("Expected identity 'git@github.com:foo/bar.git', got %q", repo.Identity)
+		}
+
+		// Verify it persists
+		repo2, err := db.GetOrCreateRepo("/tmp/identity-test")
+		if err != nil {
+			t.Fatalf("GetOrCreateRepo (second call) failed: %v", err)
+		}
+		if repo2.Identity != "git@github.com:foo/bar.git" {
+			t.Errorf("Expected identity to persist, got %q", repo2.Identity)
+		}
+	})
+
+	t.Run("backfills identity when not set", func(t *testing.T) {
+		db := openTestDB(t)
+		defer db.Close()
+
+		// Create repo without identity
+		repo1, err := db.GetOrCreateRepo("/tmp/backfill-test")
+		if err != nil {
+			t.Fatalf("GetOrCreateRepo failed: %v", err)
+		}
+		if repo1.Identity != "" {
+			t.Errorf("Expected no identity initially, got %q", repo1.Identity)
+		}
+
+		// Call again with identity - should backfill
+		repo2, err := db.GetOrCreateRepo("/tmp/backfill-test", "git@github.com:test/backfill.git")
+		if err != nil {
+			t.Fatalf("GetOrCreateRepo with identity failed: %v", err)
+		}
+		if repo2.Identity != "git@github.com:test/backfill.git" {
+			t.Errorf("Expected identity to be backfilled, got %q", repo2.Identity)
+		}
+	})
+
+	t.Run("does not overwrite existing identity", func(t *testing.T) {
+		db := openTestDB(t)
+		defer db.Close()
+
+		// Create repo with identity
+		_, err := db.GetOrCreateRepo("/tmp/no-overwrite-test", "original-identity")
+		if err != nil {
+			t.Fatalf("GetOrCreateRepo failed: %v", err)
+		}
+
+		// Call again with different identity - should NOT overwrite
+		repo2, err := db.GetOrCreateRepo("/tmp/no-overwrite-test", "new-identity")
+		if err != nil {
+			t.Fatalf("GetOrCreateRepo with new identity failed: %v", err)
+		}
+		if repo2.Identity != "original-identity" {
+			t.Errorf("Expected identity to remain 'original-identity', got %q", repo2.Identity)
+		}
+	})
+}
+
+func TestDuplicateSHAHandling(t *testing.T) {
+	t.Run("same SHA in different repos creates separate commits", func(t *testing.T) {
+		db := openTestDB(t)
+		defer db.Close()
+
+		// Create two repos
+		repo1, _ := db.GetOrCreateRepo("/tmp/sha-test-1")
+		repo2, _ := db.GetOrCreateRepo("/tmp/sha-test-2")
+
+		// Create commits with same SHA in different repos
+		commit1, err := db.GetOrCreateCommit(repo1.ID, "abc123", "Author1", "Subject1", time.Now())
+		if err != nil {
+			t.Fatalf("GetOrCreateCommit for repo1 failed: %v", err)
+		}
+
+		commit2, err := db.GetOrCreateCommit(repo2.ID, "abc123", "Author2", "Subject2", time.Now())
+		if err != nil {
+			t.Fatalf("GetOrCreateCommit for repo2 failed: %v", err)
+		}
+
+		// Should be different commits
+		if commit1.ID == commit2.ID {
+			t.Error("Same SHA in different repos should create different commits")
+		}
+		if commit1.RepoID != repo1.ID {
+			t.Error("commit1 should belong to repo1")
+		}
+		if commit2.RepoID != repo2.ID {
+			t.Error("commit2 should belong to repo2")
+		}
+	})
+
+	t.Run("GetCommitBySHA returns error when ambiguous", func(t *testing.T) {
+		db := openTestDB(t)
+		defer db.Close()
+
+		// Create two repos with same SHA
+		repo1, _ := db.GetOrCreateRepo("/tmp/ambiguous-1")
+		repo2, _ := db.GetOrCreateRepo("/tmp/ambiguous-2")
+
+		db.GetOrCreateCommit(repo1.ID, "ambiguous-sha", "Author", "Subject", time.Now())
+		db.GetOrCreateCommit(repo2.ID, "ambiguous-sha", "Author", "Subject", time.Now())
+
+		// GetCommitBySHA should fail when ambiguous
+		_, err := db.GetCommitBySHA("ambiguous-sha")
+		if err == nil {
+			t.Error("Expected error when SHA is ambiguous across repos")
+		}
+	})
+
+	t.Run("GetCommitByRepoAndSHA returns correct commit", func(t *testing.T) {
+		db := openTestDB(t)
+		defer db.Close()
+
+		// Create two repos with same SHA
+		repo1, _ := db.GetOrCreateRepo("/tmp/repo-and-sha-1")
+		repo2, _ := db.GetOrCreateRepo("/tmp/repo-and-sha-2")
+
+		commit1, _ := db.GetOrCreateCommit(repo1.ID, "same-sha", "Author1", "Subject1", time.Now())
+		commit2, _ := db.GetOrCreateCommit(repo2.ID, "same-sha", "Author2", "Subject2", time.Now())
+
+		// GetCommitByRepoAndSHA should return correct commit for each repo
+		found1, err := db.GetCommitByRepoAndSHA(repo1.ID, "same-sha")
+		if err != nil {
+			t.Fatalf("GetCommitByRepoAndSHA for repo1 failed: %v", err)
+		}
+		if found1.ID != commit1.ID {
+			t.Error("GetCommitByRepoAndSHA returned wrong commit for repo1")
+		}
+
+		found2, err := db.GetCommitByRepoAndSHA(repo2.ID, "same-sha")
+		if err != nil {
+			t.Fatalf("GetCommitByRepoAndSHA for repo2 failed: %v", err)
+		}
+		if found2.ID != commit2.ID {
+			t.Error("GetCommitByRepoAndSHA returned wrong commit for repo2")
 		}
 	})
 }
