@@ -12,14 +12,15 @@ import (
 
 // SyncWorker handles background synchronization between SQLite and PostgreSQL
 type SyncWorker struct {
-	db      *DB
-	cfg     config.SyncConfig
-	pgPool  *PgPool
-	stopCh  chan struct{}
-	doneCh  chan struct{}
-	mu      sync.Mutex // protects running and pgPool
-	syncMu  sync.Mutex // serializes sync operations (doSync, SyncNow, FinalPush)
-	running bool
+	db        *DB
+	cfg       config.SyncConfig
+	pgPool    *PgPool
+	stopCh    chan struct{}
+	doneCh    chan struct{}
+	mu        sync.Mutex // protects running and pgPool
+	syncMu    sync.Mutex // serializes sync operations (doSync, SyncNow, FinalPush)
+	connectMu sync.Mutex // serializes connect operations
+	running   bool
 }
 
 // NewSyncWorker creates a new sync worker
@@ -179,6 +180,7 @@ func (w *SyncWorker) SyncNow() (*SyncStats, error) {
 }
 
 // SyncNowWithProgress is like SyncNow but calls progressFn after each batch.
+// If not connected, attempts to connect first.
 func (w *SyncWorker) SyncNowWithProgress(progressFn func(SyncProgress)) (*SyncStats, error) {
 	w.mu.Lock()
 	if !w.running {
@@ -188,8 +190,33 @@ func (w *SyncWorker) SyncNowWithProgress(progressFn func(SyncProgress)) (*SyncSt
 	pool := w.pgPool
 	w.mu.Unlock()
 
+	// If not connected, attempt to connect now
 	if pool == nil {
-		return nil, fmt.Errorf("not connected to PostgreSQL")
+		connectTimeout := 30 * time.Second
+		if _, err := w.connect(connectTimeout); err != nil {
+			// Log full error server-side, return generic error to caller
+			// (connection errors may contain credentials or host details)
+			log.Printf("Sync: connection failed: %v", err)
+			return nil, fmt.Errorf("failed to connect to PostgreSQL")
+		}
+		// Re-check running state and get pool under lock
+		// (Stop may have been called during connect)
+		w.mu.Lock()
+		if !w.running {
+			// Worker was stopped during connect - close pool and abort
+			if w.pgPool != nil {
+				w.pgPool.Close()
+				w.pgPool = nil
+			}
+			w.mu.Unlock()
+			return nil, fmt.Errorf("sync worker stopped during connect")
+		}
+		pool = w.pgPool
+		w.mu.Unlock()
+		if pool == nil {
+			return nil, fmt.Errorf("connection succeeded but pool is nil")
+		}
+		log.Printf("Sync: connected to PostgreSQL (triggered by sync now)")
 	}
 
 	// Serialize with other sync operations
@@ -293,7 +320,8 @@ func (w *SyncWorker) run(stopCh, doneCh chan struct{}, interval, connectTimeout 
 		}
 
 		// Try to connect
-		if err := w.connect(connectTimeout); err != nil {
+		newConn, err := w.connect(connectTimeout)
+		if err != nil {
 			log.Printf("Sync: connection failed: %v (retry in %v)", err, backoff)
 			select {
 			case <-stopCh:
@@ -306,10 +334,13 @@ func (w *SyncWorker) run(stopCh, doneCh chan struct{}, interval, connectTimeout 
 
 		// Connected - reset backoff
 		backoff = time.Second
-		log.Printf("Sync: connected to PostgreSQL")
+		if newConn {
+			log.Printf("Sync: connected to PostgreSQL")
+		}
 
 		// Run sync loop until disconnection or stop
-		w.syncLoop(stopCh, interval)
+		// Only do initial sync if we made the connection (not if SyncNow connected for us)
+		w.syncLoop(stopCh, interval, newConn)
 
 		// If we get here, we disconnected - try to reconnect
 		w.mu.Lock()
@@ -321,11 +352,24 @@ func (w *SyncWorker) run(stopCh, doneCh chan struct{}, interval, connectTimeout 
 	}
 }
 
-// connect establishes the PostgreSQL connection
-func (w *SyncWorker) connect(timeout time.Duration) error {
+// connect establishes the PostgreSQL connection.
+// Serialized by connectMu to prevent concurrent connection attempts.
+// Returns (true, nil) if a new connection was made, (false, nil) if already connected.
+func (w *SyncWorker) connect(timeout time.Duration) (bool, error) {
+	w.connectMu.Lock()
+	defer w.connectMu.Unlock()
+
+	// Check if already connected (another goroutine may have connected while we waited)
+	w.mu.Lock()
+	if w.pgPool != nil {
+		w.mu.Unlock()
+		return false, nil
+	}
+	w.mu.Unlock()
+
 	url := w.cfg.PostgresURLExpanded()
 	if url == "" {
-		return fmt.Errorf("postgres_url not configured")
+		return false, fmt.Errorf("postgres_url not configured")
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
@@ -336,26 +380,26 @@ func (w *SyncWorker) connect(timeout time.Duration) error {
 
 	pool, err := NewPgPool(ctx, url, cfg)
 	if err != nil {
-		return err
+		return false, err
 	}
 
 	// Ensure schema exists
 	if err := pool.EnsureSchema(ctx); err != nil {
 		pool.Close()
-		return fmt.Errorf("ensure schema: %w", err)
+		return false, fmt.Errorf("ensure schema: %w", err)
 	}
 
 	// Check if this is a new/different Postgres database
 	dbID, err := pool.GetDatabaseID(ctx)
 	if err != nil {
 		pool.Close()
-		return fmt.Errorf("get database ID: %w", err)
+		return false, fmt.Errorf("get database ID: %w", err)
 	}
 
 	lastTargetID, err := w.db.GetSyncState(SyncStateSyncTargetID)
 	if err != nil {
 		pool.Close()
-		return fmt.Errorf("get sync target ID: %w", err)
+		return false, fmt.Errorf("get sync target ID: %w", err)
 	}
 
 	if lastTargetID != "" && lastTargetID != dbID {
@@ -370,13 +414,13 @@ func (w *SyncWorker) connect(timeout time.Duration) error {
 		log.Printf("Sync: detected new Postgres database (was %s, now %s), clearing sync state for full re-sync", oldID, newID)
 		if err := w.db.ClearAllSyncedAt(); err != nil {
 			pool.Close()
-			return fmt.Errorf("clear synced_at: %w", err)
+			return false, fmt.Errorf("clear synced_at: %w", err)
 		}
 		// Also clear pull cursors so we pull all data from the new database
 		for _, key := range []string{SyncStateLastJobCursor, SyncStateLastReviewCursor, SyncStateLastResponseID} {
 			if err := w.db.SetSyncState(key, ""); err != nil {
 				pool.Close()
-				return fmt.Errorf("clear %s: %w", key, err)
+				return false, fmt.Errorf("clear %s: %w", key, err)
 			}
 		}
 	}
@@ -384,36 +428,40 @@ func (w *SyncWorker) connect(timeout time.Duration) error {
 	// Update the sync target ID
 	if err := w.db.SetSyncState(SyncStateSyncTargetID, dbID); err != nil {
 		pool.Close()
-		return fmt.Errorf("set sync target ID: %w", err)
+		return false, fmt.Errorf("set sync target ID: %w", err)
 	}
 
 	// Register this machine
 	machineID, err := w.db.GetMachineID()
 	if err != nil {
 		pool.Close()
-		return fmt.Errorf("get machine ID: %w", err)
+		return false, fmt.Errorf("get machine ID: %w", err)
 	}
 
 	if err := pool.RegisterMachine(ctx, machineID, w.cfg.MachineName); err != nil {
 		pool.Close()
-		return fmt.Errorf("register machine: %w", err)
+		return false, fmt.Errorf("register machine: %w", err)
 	}
 
 	w.mu.Lock()
 	w.pgPool = pool
 	w.mu.Unlock()
 
-	return nil
+	return true, nil
 }
 
 // syncLoop runs the periodic sync until stop or disconnection
-func (w *SyncWorker) syncLoop(stopCh <-chan struct{}, interval time.Duration) {
+// doInitialSync controls whether to sync immediately on entry (only when we made the connection)
+func (w *SyncWorker) syncLoop(stopCh <-chan struct{}, interval time.Duration, doInitialSync bool) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
-	// Do initial sync immediately
-	if err := w.doSync(); err != nil {
-		log.Printf("Sync: error: %v", err)
+	// Do initial sync immediately only if we made the connection
+	// (if SyncNow connected, it will handle its own sync)
+	if doInitialSync {
+		if err := w.doSync(); err != nil {
+			log.Printf("Sync: error: %v", err)
+		}
 	}
 
 	for {
