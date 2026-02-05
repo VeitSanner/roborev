@@ -346,29 +346,19 @@ func initCmd() *cobra.Command {
 					fmt.Println("  Hook already installed")
 					goto startDaemon
 				} else {
-					// Upgrade: strip old roborev lines, append new content
-					lines := strings.Split(existingStr, "\n")
-					var kept []string
-					for _, line := range lines {
-						if !strings.Contains(strings.ToLower(line), "roborev") {
-							kept = append(kept, line)
+					// Upgrade: try patching in place first (preserves hook structure)
+					// v1 → v2: remove trailing & from enqueue line, add version marker
+					upgraded := existingStr
+					upgraded = strings.Replace(upgraded, "2>/dev/null &", "2>/dev/null", 1)
+					upgraded = strings.Replace(upgraded, "post-commit hook -", "post-commit hook v2 -", 1)
+					if !strings.Contains(upgraded, hookVersionMarker) {
+						// Comment was edited — just append a marker so we don't re-upgrade
+						if !strings.HasSuffix(upgraded, "\n") {
+							upgraded += "\n"
 						}
+						upgraded += "# " + hookVersionMarker + "\n"
 					}
-					// Remove trailing empty lines
-					for len(kept) > 0 && strings.TrimSpace(kept[len(kept)-1]) == "" {
-						kept = kept[:len(kept)-1]
-					}
-					// Strip shebang from new content if prepending to existing content
-					newHook := hookContent
-					if len(kept) > 0 {
-						newHook = strings.TrimPrefix(newHook, "#!/bin/sh\n")
-					}
-					if len(kept) > 0 {
-						hookContent = strings.Join(kept, "\n") + "\n" + newHook
-					} else {
-						hookContent = newHook
-					}
-					if err := os.WriteFile(hookPath, []byte(hookContent), 0755); err != nil {
+					if err := os.WriteFile(hookPath, []byte(upgraded), 0755); err != nil {
 						return fmt.Errorf("upgrade hook: %w", err)
 					}
 					fmt.Println("  Upgraded post-commit hook")
@@ -2839,9 +2829,6 @@ func hookNeedsUpgrade(repoPath string) bool {
 	return strings.Contains(strings.ToLower(s), "roborev") && !strings.Contains(s, hookVersionMarker)
 }
 
-// generateHookContent creates the post-commit hook script content.
-// It bakes the path to the currently running binary for consistency.
-// Falls back to PATH lookup if the baked path becomes unavailable.
 func generateHookContent() string {
 	// Get path to the currently running binary (not just first in PATH)
 	roborevPath, err := os.Executable()
