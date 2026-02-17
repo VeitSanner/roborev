@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -208,7 +209,7 @@ func (a *ClaudeAgent) parseStreamJSON(r io.Reader, output io.Writer) (string, er
 		if line != "" {
 			// Stream raw line to the writer for progress visibility
 			if sw := newSyncWriter(output); sw != nil {
-				sw.Write([]byte(line + "\n"))
+				_, _ = sw.Write([]byte(line + "\n"))
 			}
 
 			var msg claudeStreamMessage
@@ -256,13 +257,7 @@ func filterEnv(env []string, keys ...string) []string {
 	result := make([]string, 0, len(env))
 	for _, e := range env {
 		k, _, _ := strings.Cut(e, "=")
-		strip := false
-		for _, key := range keys {
-			if k == key {
-				strip = true
-				break
-			}
-		}
+		strip := slices.Contains(keys, k)
 		if !strip {
 			result = append(result, e)
 		}

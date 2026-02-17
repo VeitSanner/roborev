@@ -26,7 +26,7 @@ var pgSchemaSQL string
 // Parsed from the embedded SQL file.
 func pgSchemaStatements() []string {
 	var stmts []string
-	for _, stmt := range strings.Split(pgSchemaSQL, ";") {
+	for stmt := range strings.SplitSeq(pgSchemaSQL, ";") {
 		stmt = strings.TrimSpace(stmt)
 		if stmt == "" {
 			continue
@@ -462,7 +462,11 @@ func (p *PgPool) Tx(ctx context.Context, fn func(tx pgx.Tx) error) error {
 	if err != nil {
 		return fmt.Errorf("begin transaction: %w", err)
 	}
-	defer tx.Rollback(ctx)
+	defer func() {
+		if err := tx.Rollback(ctx); err != nil && err != pgx.ErrTxClosed {
+			return
+		}
+	}()
 
 	if err := fn(tx); err != nil {
 		return err
@@ -722,7 +726,7 @@ func (p *PgPool) PullResponses(ctx context.Context, excludeMachineID string, aft
 	defer rows.Close()
 
 	var responses []PulledResponse
-	var lastID int64 = afterID
+	var lastID = afterID
 
 	for rows.Next() {
 		var r PulledResponse
@@ -745,7 +749,7 @@ func (p *PgPool) PullResponses(ctx context.Context, excludeMachineID string, aft
 }
 
 // nullString returns nil if s is empty, otherwise returns s
-func nullString(s string) interface{} {
+func nullString(s string) any {
 	if s == "" {
 		return nil
 	}

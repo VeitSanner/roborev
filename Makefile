@@ -3,7 +3,7 @@
 VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 LDFLAGS := -X github.com/roborev-dev/roborev/internal/version.Version=$(VERSION)
 
-.PHONY: build install clean test test-integration test-postgres test-all postgres-up postgres-down test-postgres-ci
+.PHONY: build install clean test test-integration test-postgres test-all postgres-up postgres-down test-postgres-ci lint install-hooks
 
 build:
 	@mkdir -p bin
@@ -44,6 +44,25 @@ test-postgres: postgres-up
 
 # Run all tests (unit + integration + postgres)
 test-all: test-integration test-postgres
+
+# Lint Go code with project defaults
+lint:
+	@if ! command -v golangci-lint >/dev/null 2>&1; then \
+		echo "golangci-lint not found. Install with: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.10.1" >&2; \
+		exit 1; \
+	fi
+	golangci-lint run ./...
+
+# Install pre-commit hook, resolving the hooks directory via git so
+# this works in both normal repos and linked worktrees
+install-hooks:
+	@hooks_rel=$$(git rev-parse --git-path hooks) && \
+		hooks_dir=$$(cd "$$(dirname "$$hooks_rel")" && echo "$$PWD/$$(basename "$$hooks_rel")") && \
+		git config --local core.hooksPath "$$hooks_dir" && \
+		mkdir -p "$$hooks_dir" && \
+		cp .githooks/pre-commit "$$hooks_dir/pre-commit" && \
+		chmod +x "$$hooks_dir/pre-commit" && \
+		echo "Installed pre-commit hook to $$hooks_dir/pre-commit"
 
 # CI target: run postgres tests without managing docker (assumes postgres is running)
 test-postgres-ci:
