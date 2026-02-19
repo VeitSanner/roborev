@@ -33,11 +33,16 @@ type WorkerPool struct {
 	pendingCancels map[int64]bool // Jobs canceled before registered
 	runningJobsMu  sync.Mutex
 
+	// Agent cooldowns for quota exhaustion
+	agentCooldowns   map[string]time.Time // agent name -> expiry
+	agentCooldownsMu sync.RWMutex
+
 	// Output capture for tail command
 	outputBuffers *OutputBuffer
 
 	// Test hooks for deterministic synchronization (nil in production)
-	testHookAfterSecondCheck func() // Called after second runningJobs check, before second DB lookup
+	testHookAfterSecondCheck    func() // Called after second runningJobs check, before second DB lookup
+	testHookCooldownLockUpgrade func() // Called between RUnlock and Lock in isAgentCoolingDown
 }
 
 // NewWorkerPool creates a new worker pool
@@ -52,6 +57,7 @@ func NewWorkerPool(db *storage.DB, cfgGetter ConfigGetter, numWorkers int, broad
 		stopCh:         make(chan struct{}),
 		runningJobs:    make(map[int64]context.CancelFunc),
 		pendingCancels: make(map[int64]bool),
+		agentCooldowns: make(map[string]time.Time),
 		outputBuffers:  NewOutputBuffer(512*1024, 4*1024*1024), // 512KB/job, 4MB total
 	}
 }
@@ -280,6 +286,17 @@ func (wp *WorkerPool) processJob(workerID string, job *storage.ReviewJob) {
 	wp.registerRunningJob(job.ID, cancel)
 	defer wp.unregisterRunningJob(job.ID)
 
+	// Skip immediately if the agent is in quota cooldown.
+	// Resolve alias so "claude" checks cooldown for "claude-code".
+	canonicalAgent := agent.CanonicalName(job.Agent)
+	if wp.isAgentCoolingDown(canonicalAgent) {
+		log.Printf("[%s] Agent %s in cooldown, skipping job %d",
+			workerID, canonicalAgent, job.ID)
+		wp.failoverOrFail(workerID, job, canonicalAgent,
+			fmt.Sprintf("agent %s quota cooldown active", canonicalAgent))
+		return
+	}
+
 	// Build the prompt (or use pre-stored prompt for task/compact jobs)
 	var reviewPrompt string
 	var err error
@@ -447,6 +464,17 @@ func (wp *WorkerPool) failOrRetryAgent(workerID string, job *storage.ReviewJob, 
 }
 
 func (wp *WorkerPool) failOrRetryInner(workerID string, job *storage.ReviewJob, agentName string, errorMsg string, agentError bool) {
+	// Quota errors skip retries entirely — cool down the agent and
+	// attempt failover or fail with a quota-prefixed error.
+	if agentError && isQuotaError(errorMsg) {
+		dur := parseQuotaCooldown(errorMsg, defaultCooldown)
+		wp.cooldownAgent(agentName, time.Now().Add(dur))
+		log.Printf("[%s] Agent %s quota exhausted, cooldown %v",
+			workerID, agentName, dur)
+		wp.failoverOrFail(workerID, job, agentName, errorMsg)
+		return
+	}
+
 	retried, err := wp.db.RetryJob(job.ID, workerID, maxRetries)
 	if err != nil {
 		log.Printf("[%s] Error retrying job: %v", workerID, err)
@@ -468,7 +496,7 @@ func (wp *WorkerPool) failOrRetryInner(workerID string, job *storage.ReviewJob, 
 		// Retries exhausted -- attempt failover to backup agent if this is an agent error
 		if agentError {
 			backupAgent := wp.resolveBackupAgent(job)
-			if backupAgent != "" {
+			if backupAgent != "" && !wp.isAgentCoolingDown(backupAgent) {
 				failedOver, foErr := wp.db.FailoverJob(job.ID, workerID, backupAgent)
 				if foErr != nil {
 					log.Printf("[%s] Error attempting failover for job %d: %v", workerID, job.ID, foErr)
@@ -514,7 +542,7 @@ func (wp *WorkerPool) resolveBackupAgent(job *storage.ReviewJob) string {
 	if err != nil || !agent.IsAvailable(resolved.Name()) {
 		return ""
 	}
-	if resolved.Name() == job.Agent {
+	if resolved.Name() == agent.CanonicalName(job.Agent) {
 		return ""
 	}
 	return resolved.Name()
@@ -532,6 +560,148 @@ func (wp *WorkerPool) broadcastFailed(job *storage.ReviewJob, agentName, errorMs
 		Agent:    agentName,
 		Error:    errorMsg,
 	})
+}
+
+// quotaErrorPrefix is prepended to error messages when a job is failed
+// due to agent quota exhaustion. CI poller checks for this prefix to
+// distinguish quota failures from real failures.
+const quotaErrorPrefix = "quota: "
+
+// defaultCooldown is the fallback duration when the error message doesn't
+// contain a parseable "reset after" token.
+const defaultCooldown = 30 * time.Minute
+const minCooldown = 1 * time.Minute
+const maxCooldown = 24 * time.Hour
+
+// isQuotaError returns true if the error message indicates a hard API
+// quota exhaustion (case-insensitive). Transient rate-limit/429 errors
+// are excluded — those should go through normal retries, not cooldown.
+func isQuotaError(errMsg string) bool {
+	lower := strings.ToLower(errMsg)
+	patterns := []string{
+		"resource exhausted",
+		"quota exceeded",
+		"quota_exceeded",
+		"quota exhausted",
+		"quota_exhausted",
+		"insufficient_quota",
+		"exhausted your capacity",
+	}
+	for _, p := range patterns {
+		if strings.Contains(lower, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// parseQuotaCooldown extracts a Go-format duration from a "reset after
+// <dur>" substring. Returns fallback if not found or unparseable.
+func parseQuotaCooldown(errMsg string, fallback time.Duration) time.Duration {
+	lower := strings.ToLower(errMsg)
+	idx := strings.Index(lower, "reset after ")
+	if idx < 0 {
+		return fallback
+	}
+	rest := errMsg[idx+len("reset after "):]
+	// Take the next whitespace-delimited token as a duration
+	token := rest
+	if sp := strings.IndexAny(rest, " \t\n,;)"); sp > 0 {
+		token = rest[:sp]
+	}
+	token = strings.TrimRight(token, ".,;:)]}")
+	d, err := time.ParseDuration(token)
+	if err != nil || d <= 0 {
+		return fallback
+	}
+	if d < minCooldown {
+		return minCooldown
+	}
+	if d > maxCooldown {
+		return maxCooldown
+	}
+	return d
+}
+
+// cooldownAgent sets or extends the cooldown expiry for an agent.
+// Only extends — never shortens an existing cooldown.
+func (wp *WorkerPool) cooldownAgent(name string, until time.Time) {
+	name = agent.CanonicalName(name)
+	wp.agentCooldownsMu.Lock()
+	defer wp.agentCooldownsMu.Unlock()
+	if existing, ok := wp.agentCooldowns[name]; ok && existing.After(until) {
+		return
+	}
+	wp.agentCooldowns[name] = until
+}
+
+// isAgentCoolingDown returns true if the agent is currently in a
+// quota cooldown period. Expired entries are cleaned up eagerly.
+func (wp *WorkerPool) isAgentCoolingDown(name string) bool {
+	name = agent.CanonicalName(name)
+	wp.agentCooldownsMu.RLock()
+	expiry, ok := wp.agentCooldowns[name]
+	if !ok {
+		wp.agentCooldownsMu.RUnlock()
+		return false
+	}
+	if time.Now().After(expiry) {
+		wp.agentCooldownsMu.RUnlock()
+		if wp.testHookCooldownLockUpgrade != nil {
+			wp.testHookCooldownLockUpgrade()
+		}
+		// Upgrade to write lock and delete expired entry
+		wp.agentCooldownsMu.Lock()
+		// Re-check under write lock (may have been refreshed)
+		exp, stillExists := wp.agentCooldowns[name]
+		if stillExists && time.Now().After(exp) {
+			delete(wp.agentCooldowns, name)
+			wp.agentCooldownsMu.Unlock()
+			return false
+		}
+		wp.agentCooldownsMu.Unlock()
+		return stillExists
+	}
+	wp.agentCooldownsMu.RUnlock()
+	return true
+}
+
+// failoverOrFail attempts failover to a backup agent for the job.
+// If no backup is available, fails the job with a quota-prefixed error.
+func (wp *WorkerPool) failoverOrFail(
+	workerID string, job *storage.ReviewJob,
+	agentName, errorMsg string,
+) {
+	backupAgent := wp.resolveBackupAgent(job)
+	if backupAgent != "" && !wp.isAgentCoolingDown(backupAgent) {
+		failedOver, err := wp.db.FailoverJob(
+			job.ID, workerID, backupAgent,
+		)
+		if err != nil {
+			log.Printf("[%s] Error attempting failover for job %d: %v",
+				workerID, job.ID, err)
+		}
+		if failedOver {
+			log.Printf("[%s] Job %d failing over from %s to %s (quota): %s",
+				workerID, job.ID, agentName, backupAgent, errorMsg)
+			return
+		}
+	}
+
+	// No backup or failover failed — fail with quota prefix
+	quotaMsg := quotaErrorPrefix + errorMsg
+	if updated, err := wp.db.FailJob(job.ID, workerID, quotaMsg); err != nil {
+		log.Printf("[%s] Error failing job %d: %v", workerID, job.ID, err)
+	} else if updated {
+		log.Printf("[%s] Job %d skipped (agent %s quota exhausted)",
+			workerID, job.ID, agentName)
+		wp.broadcastFailed(job, agentName, quotaMsg)
+		if wp.errorLog != nil {
+			wp.errorLog.LogError("worker",
+				fmt.Sprintf("job %d skipped (quota): %s", job.ID, errorMsg),
+				job.ID)
+		}
+	}
 }
 
 // markCompactSourceJobs marks all source jobs as addressed for a completed compact job

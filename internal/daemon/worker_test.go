@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -280,6 +281,565 @@ func TestWorkerPoolCancelJobFinalCheckDeadlockSafe(t *testing.T) {
 
 	if !canceled {
 		t.Error("Job should have been canceled via final check path")
+	}
+}
+
+func TestIsQuotaError(t *testing.T) {
+	tests := []struct {
+		errMsg string
+		want   bool
+	}{
+		// Hard quota exhaustion — should trigger cooldown/skip
+		{"quota exceeded for model", true},
+		{"QUOTA_EXCEEDED: limit reached", true},
+		{"quota exhausted, reset after 8h", true},
+		{"QUOTA_EXHAUSTED: try later", true},
+		{"insufficient_quota: limit reached", true},
+		{"You have exhausted your capacity", true},
+		{"RESOURCE EXHAUSTED: try later", true},
+		// Transient rate limits — should NOT trigger cooldown (use retries)
+		{"Rate limit reached", false},
+		{"rate_limit_error: too fast", false},
+		{"Too Many Requests (429)", false},
+		{"HTTP 429: slow down", false},
+		{"status 429 received from API", false},
+		// Other non-quota errors
+		{"connection reset by peer", false},
+		{"timeout after 30s", false},
+		{"agent not found", false},
+		{"disk quota full", false},
+		{"", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.errMsg, func(t *testing.T) {
+			if got := isQuotaError(tt.errMsg); got != tt.want {
+				t.Errorf("isQuotaError(%q) = %v, want %v",
+					tt.errMsg, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestParseQuotaCooldown(t *testing.T) {
+	tests := []struct {
+		name     string
+		errMsg   string
+		fallback time.Duration
+		want     time.Duration
+	}{
+		{
+			name:     "extracts go duration",
+			errMsg:   "quota exhausted, reset after 8h26m13s please wait",
+			fallback: 30 * time.Minute,
+			want:     8*time.Hour + 26*time.Minute + 13*time.Second,
+		},
+		{
+			name:     "no reset token falls back",
+			errMsg:   "quota exceeded for model gemini-2.5-pro",
+			fallback: 30 * time.Minute,
+			want:     30 * time.Minute,
+		},
+		{
+			name:     "unparseable duration falls back",
+			errMsg:   "reset after bogus",
+			fallback: 15 * time.Minute,
+			want:     15 * time.Minute,
+		},
+		{
+			name:     "duration at end of string",
+			errMsg:   "reset after 2h30m",
+			fallback: 30 * time.Minute,
+			want:     2*time.Hour + 30*time.Minute,
+		},
+		{
+			name:     "trailing punctuation trimmed",
+			errMsg:   "reset after 8h26m13s.",
+			fallback: 30 * time.Minute,
+			want:     8*time.Hour + 26*time.Minute + 13*time.Second,
+		},
+		{
+			name:     "trailing paren trimmed",
+			errMsg:   "reset after 1h30m)",
+			fallback: 30 * time.Minute,
+			want:     1*time.Hour + 30*time.Minute,
+		},
+		{
+			name:     "clamped to max 24h",
+			errMsg:   "reset after 99999h",
+			fallback: 30 * time.Minute,
+			want:     24 * time.Hour,
+		},
+		{
+			name:     "clamped to min 1m",
+			errMsg:   "reset after 5s",
+			fallback: 30 * time.Minute,
+			want:     1 * time.Minute,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := parseQuotaCooldown(tt.errMsg, tt.fallback)
+			if got != tt.want {
+				t.Errorf("parseQuotaCooldown() = %v, want %v",
+					got, tt.want)
+			}
+		})
+	}
+}
+
+func TestAgentCooldown(t *testing.T) {
+	cfg := config.DefaultConfig()
+	pool := NewWorkerPool(nil, NewStaticConfig(cfg), 1, NewBroadcaster(), nil)
+
+	// Not cooling down initially
+	if pool.isAgentCoolingDown("gemini") {
+		t.Error("expected gemini not in cooldown initially")
+	}
+
+	// Set cooldown
+	pool.cooldownAgent("gemini", time.Now().Add(1*time.Hour))
+	if !pool.isAgentCoolingDown("gemini") {
+		t.Error("expected gemini in cooldown after set")
+	}
+
+	// Different agent not affected
+	if pool.isAgentCoolingDown("codex") {
+		t.Error("expected codex not in cooldown")
+	}
+
+	// Expired cooldown returns false
+	pool.cooldownAgent("codex", time.Now().Add(-1*time.Second))
+	if pool.isAgentCoolingDown("codex") {
+		t.Error("expected expired cooldown to return false")
+	}
+
+	// cooldownAgent never shortens
+	pool.cooldownAgent("gemini", time.Now().Add(1*time.Minute))
+	if !pool.isAgentCoolingDown("gemini") {
+		t.Error("cooldown should not have been shortened")
+	}
+}
+
+func TestAgentCooldown_ExpiredEntryDeleted(t *testing.T) {
+	cfg := config.DefaultConfig()
+	pool := NewWorkerPool(
+		nil, NewStaticConfig(cfg), 1, NewBroadcaster(), nil,
+	)
+
+	// Set an already-expired cooldown
+	pool.cooldownAgent("gemini", time.Now().Add(-1*time.Second))
+
+	// Should return false and clean up the entry
+	if pool.isAgentCoolingDown("gemini") {
+		t.Error("expected expired cooldown to return false")
+	}
+
+	// Entry should be deleted from the map
+	pool.agentCooldownsMu.RLock()
+	_, exists := pool.agentCooldowns["gemini"]
+	pool.agentCooldownsMu.RUnlock()
+	if exists {
+		t.Error("expected expired entry to be deleted from map")
+	}
+}
+
+func TestAgentCooldown_RefreshDuringUpgrade(t *testing.T) {
+	cfg := config.DefaultConfig()
+	pool := NewWorkerPool(
+		nil, NewStaticConfig(cfg), 1, NewBroadcaster(), nil,
+	)
+
+	// Set an already-expired cooldown so RLock path enters upgrade
+	pool.cooldownAgent("gemini", time.Now().Add(-1*time.Second))
+
+	// Use the test hook to refresh the cooldown in the window
+	// between RUnlock and Lock, simulating a concurrent goroutine.
+	pool.testHookCooldownLockUpgrade = func() {
+		pool.agentCooldownsMu.Lock()
+		pool.agentCooldowns["gemini"] = time.Now().Add(1 * time.Hour)
+		pool.agentCooldownsMu.Unlock()
+	}
+
+	// The read-lock path sees expired, upgrades, recheck sees
+	// refreshed entry — should return true.
+	if !pool.isAgentCoolingDown("gemini") {
+		t.Error("expected refreshed cooldown to return true")
+	}
+}
+
+func TestProcessJob_CooldownResolvesAlias(t *testing.T) {
+	tc := newWorkerTestContext(t, 1)
+	sha := testutil.GetHeadSHA(t, tc.TmpDir)
+
+	// Enqueue a job with the alias "claude" (canonical: "claude-code")
+	commit, err := tc.DB.GetOrCreateCommit(
+		tc.Repo.ID, sha, "A", "S", time.Now(),
+	)
+	if err != nil {
+		t.Fatalf("GetOrCreateCommit: %v", err)
+	}
+	job, err := tc.DB.EnqueueJob(storage.EnqueueOpts{
+		RepoID:   tc.Repo.ID,
+		CommitID: commit.ID,
+		GitRef:   sha,
+		Agent:    "claude",
+	})
+	if err != nil {
+		t.Fatalf("EnqueueJob: %v", err)
+	}
+	claimed, err := tc.DB.ClaimJob("test-worker")
+	if err != nil || claimed.ID != job.ID {
+		t.Fatalf("ClaimJob: err=%v, claimed=%v", err, claimed)
+	}
+
+	// Cool down "claude-code" (canonical name)
+	tc.Pool.cooldownAgent(
+		"claude-code", time.Now().Add(1*time.Hour),
+	)
+
+	// processJob should detect cooldown via alias resolution
+	tc.Pool.processJob("test-worker", claimed)
+
+	updated, err := tc.DB.GetJobByID(job.ID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	if updated.Status != storage.JobStatusFailed {
+		t.Errorf(
+			"status=%q, want failed (cooldown via alias)",
+			updated.Status,
+		)
+	}
+}
+
+func TestResolveBackupAgent_AliasMatchesPrimary(t *testing.T) {
+	// "claude" is an alias for "claude-code". If job.Agent is "claude"
+	// and backup resolves to "claude-code", they are the same agent.
+	cfg := config.DefaultConfig()
+	cfg.DefaultBackupAgent = "claude-code"
+	pool := NewWorkerPool(
+		nil, NewStaticConfig(cfg), 1, NewBroadcaster(), nil,
+	)
+	job := &storage.ReviewJob{
+		Agent:    "claude",
+		RepoPath: t.TempDir(),
+	}
+	got := pool.resolveBackupAgent(job)
+	// Should return "" because claude == claude-code after alias
+	// resolution. (May also return "" if claude-code binary is not
+	// installed, which is fine — both reasons are correct.)
+	if got != "" {
+		t.Errorf(
+			"resolveBackupAgent() = %q, want empty (alias match)",
+			got,
+		)
+	}
+}
+
+func TestFailOrRetryInner_QuotaSkipsRetries(t *testing.T) {
+	tc := newWorkerTestContext(t, 1)
+	sha := testutil.GetHeadSHA(t, tc.TmpDir)
+	job := tc.createAndClaimJob(t, sha, "test-worker")
+
+	// Subscribe to events to verify broadcast
+	_, eventCh := tc.Broadcaster.Subscribe("")
+
+	quotaErr := "resource exhausted: reset after 1h"
+	tc.Pool.failOrRetryInner("test-worker", job, "gemini", quotaErr, true)
+
+	// Job should be failed (not retried) with quota prefix
+	updated, err := tc.DB.GetJobByID(job.ID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	if updated.Status != storage.JobStatusFailed {
+		t.Errorf("status=%q, want failed", updated.Status)
+	}
+	if !strings.HasPrefix(updated.Error, quotaErrorPrefix) {
+		t.Errorf("error=%q, want prefix %q", updated.Error, quotaErrorPrefix)
+	}
+
+	// Retry count should be 0 — no retries attempted
+	retryCount, err := tc.DB.GetJobRetryCount(job.ID)
+	if err != nil {
+		t.Fatalf("GetJobRetryCount: %v", err)
+	}
+	if retryCount != 0 {
+		t.Errorf("retry_count=%d, want 0 (quota should skip retries)", retryCount)
+	}
+
+	// Agent should be in cooldown
+	if !tc.Pool.isAgentCoolingDown("gemini") {
+		t.Error("expected gemini in cooldown after quota error")
+	}
+
+	// Broadcast should have fired
+	select {
+	case ev := <-eventCh:
+		if ev.Type != "review.failed" {
+			t.Errorf("event type=%q, want review.failed", ev.Type)
+		}
+		if !strings.HasPrefix(ev.Error, quotaErrorPrefix) {
+			t.Errorf("event error=%q, want prefix %q", ev.Error, quotaErrorPrefix)
+		}
+	case <-time.After(time.Second):
+		t.Error("no broadcast event received")
+	}
+}
+
+func TestFailOrRetryInner_QuotaExhaustedVariant(t *testing.T) {
+	tc := newWorkerTestContext(t, 1)
+	sha := testutil.GetHeadSHA(t, tc.TmpDir)
+	job := tc.createAndClaimJob(t, sha, "test-worker")
+
+	// "quota exhausted" (not "quota exceeded") must also trigger quota-skip
+	tc.Pool.failOrRetryInner("test-worker", job, "gemini", "quota exhausted, reset after 2h", true)
+
+	updated, err := tc.DB.GetJobByID(job.ID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	if updated.Status != storage.JobStatusFailed {
+		t.Errorf("status=%q, want failed", updated.Status)
+	}
+	if !strings.HasPrefix(updated.Error, quotaErrorPrefix) {
+		t.Errorf("error=%q, want prefix %q", updated.Error, quotaErrorPrefix)
+	}
+	retryCount, _ := tc.DB.GetJobRetryCount(job.ID)
+	if retryCount != 0 {
+		t.Errorf("retry_count=%d, want 0", retryCount)
+	}
+}
+
+func TestFailOrRetryInner_NonQuotaStillRetries(t *testing.T) {
+	tc := newWorkerTestContext(t, 1)
+	sha := testutil.GetHeadSHA(t, tc.TmpDir)
+	job := tc.createAndClaimJob(t, sha, "test-worker")
+
+	// A non-quota agent error should follow the normal retry path
+	tc.Pool.failOrRetryInner("test-worker", job, "gemini", "connection reset", true)
+
+	updated, err := tc.DB.GetJobByID(job.ID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	// Should be queued for retry, not failed
+	if updated.Status != storage.JobStatusQueued {
+		t.Errorf("status=%q, want queued (retry)", updated.Status)
+	}
+
+	retryCount, err := tc.DB.GetJobRetryCount(job.ID)
+	if err != nil {
+		t.Fatalf("GetJobRetryCount: %v", err)
+	}
+	if retryCount != 1 {
+		t.Errorf("retry_count=%d, want 1", retryCount)
+	}
+
+	// Agent should NOT be in cooldown
+	if tc.Pool.isAgentCoolingDown("gemini") {
+		t.Error("expected gemini NOT in cooldown for non-quota error")
+	}
+}
+
+func TestFailoverOrFail_FailsOverToBackup(t *testing.T) {
+	tc := newWorkerTestContext(t, 1)
+	sha := testutil.GetHeadSHA(t, tc.TmpDir)
+
+	// Configure backup agent
+	cfg := config.DefaultConfig()
+	cfg.DefaultBackupAgent = "test"
+	tc.Pool = NewWorkerPool(tc.DB, NewStaticConfig(cfg), 1, tc.Broadcaster, nil)
+
+	// Enqueue with agent "codex" (backup is "test")
+	commit, err := tc.DB.GetOrCreateCommit(tc.Repo.ID, sha, "A", "S", time.Now())
+	if err != nil {
+		t.Fatalf("GetOrCreateCommit: %v", err)
+	}
+	job, err := tc.DB.EnqueueJob(storage.EnqueueOpts{
+		RepoID:   tc.Repo.ID,
+		CommitID: commit.ID,
+		GitRef:   sha,
+		Agent:    "codex",
+	})
+	if err != nil {
+		t.Fatalf("EnqueueJob: %v", err)
+	}
+	claimed, err := tc.DB.ClaimJob("test-worker")
+	if err != nil || claimed.ID != job.ID {
+		t.Fatalf("ClaimJob: err=%v, claimed=%v", err, claimed)
+	}
+	// Fill in RepoPath so resolveBackupAgent can work
+	job.RepoPath = tc.TmpDir
+
+	tc.Pool.failoverOrFail("test-worker", job, "codex", "quota exhausted")
+
+	updated, err := tc.DB.GetJobByID(job.ID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	// Should be queued for failover, agent changed to "test"
+	if updated.Status != storage.JobStatusQueued {
+		t.Errorf("status=%q, want queued (failover)", updated.Status)
+	}
+	if updated.Agent != "test" {
+		t.Errorf("agent=%q, want test (failover)", updated.Agent)
+	}
+}
+
+func TestFailoverOrFail_NoBackupFailsWithQuotaPrefix(t *testing.T) {
+	tc := newWorkerTestContext(t, 1)
+	sha := testutil.GetHeadSHA(t, tc.TmpDir)
+	job := tc.createAndClaimJob(t, sha, "test-worker")
+
+	// No backup configured — should fail with quota prefix
+	tc.Pool.failoverOrFail("test-worker", job, "test", "quota exhausted")
+
+	updated, err := tc.DB.GetJobByID(job.ID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	if updated.Status != storage.JobStatusFailed {
+		t.Errorf("status=%q, want failed", updated.Status)
+	}
+	if !strings.HasPrefix(updated.Error, quotaErrorPrefix) {
+		t.Errorf("error=%q, want prefix %q", updated.Error, quotaErrorPrefix)
+	}
+}
+
+func TestFailOrRetryInner_RetryExhaustedBackupInCooldown(t *testing.T) {
+	tc := newWorkerTestContext(t, 1)
+	sha := testutil.GetHeadSHA(t, tc.TmpDir)
+
+	// Configure backup agent
+	cfg := config.DefaultConfig()
+	cfg.DefaultBackupAgent = "test"
+	tc.Pool = NewWorkerPool(
+		tc.DB, NewStaticConfig(cfg), 1, tc.Broadcaster, nil,
+	)
+
+	// Enqueue with agent "codex"
+	commit, err := tc.DB.GetOrCreateCommit(
+		tc.Repo.ID, sha, "A", "S", time.Now(),
+	)
+	if err != nil {
+		t.Fatalf("GetOrCreateCommit: %v", err)
+	}
+	job, err := tc.DB.EnqueueJob(storage.EnqueueOpts{
+		RepoID:   tc.Repo.ID,
+		CommitID: commit.ID,
+		GitRef:   sha,
+		Agent:    "codex",
+	})
+	if err != nil {
+		t.Fatalf("EnqueueJob: %v", err)
+	}
+	claimed, err := tc.DB.ClaimJob("test-worker")
+	if err != nil || claimed.ID != job.ID {
+		t.Fatalf("ClaimJob: err=%v, claimed=%v", err, claimed)
+	}
+	job.RepoPath = tc.TmpDir
+
+	// Exhaust retries
+	for i := range maxRetries {
+		tc.Pool.failOrRetryInner(
+			"test-worker", job, "codex",
+			"connection reset", true,
+		)
+		reclaimed, claimErr := tc.DB.ClaimJob("test-worker")
+		if claimErr != nil || reclaimed == nil {
+			t.Fatalf("re-claim after retry %d: %v", i, claimErr)
+		}
+		job = reclaimed
+	}
+
+	// Put the backup agent in cooldown
+	tc.Pool.cooldownAgent(
+		"test", time.Now().Add(30*time.Minute),
+	)
+
+	// Final failure — retries exhausted, backup in cooldown
+	tc.Pool.failOrRetryInner(
+		"test-worker", job, "codex",
+		"connection reset", true,
+	)
+
+	updated, err := tc.DB.GetJobByID(job.ID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	// Should be failed, NOT queued for failover to cooled-down agent
+	if updated.Status != storage.JobStatusFailed {
+		t.Errorf("status=%q, want failed", updated.Status)
+	}
+	// Agent should still be codex (not failed over)
+	if updated.Agent != "codex" {
+		t.Errorf("agent=%q, want codex (no failover)", updated.Agent)
+	}
+}
+
+func TestFailOrRetryInner_RetryExhaustedFailsOverToBackup(t *testing.T) {
+	tc := newWorkerTestContext(t, 1)
+	sha := testutil.GetHeadSHA(t, tc.TmpDir)
+
+	// Configure backup agent
+	cfg := config.DefaultConfig()
+	cfg.DefaultBackupAgent = "test"
+	tc.Pool = NewWorkerPool(
+		tc.DB, NewStaticConfig(cfg), 1, tc.Broadcaster, nil,
+	)
+
+	// Enqueue with agent "codex"
+	commit, err := tc.DB.GetOrCreateCommit(
+		tc.Repo.ID, sha, "A", "S", time.Now(),
+	)
+	if err != nil {
+		t.Fatalf("GetOrCreateCommit: %v", err)
+	}
+	job, err := tc.DB.EnqueueJob(storage.EnqueueOpts{
+		RepoID:   tc.Repo.ID,
+		CommitID: commit.ID,
+		GitRef:   sha,
+		Agent:    "codex",
+	})
+	if err != nil {
+		t.Fatalf("EnqueueJob: %v", err)
+	}
+	claimed, err := tc.DB.ClaimJob("test-worker")
+	if err != nil || claimed.ID != job.ID {
+		t.Fatalf("ClaimJob: err=%v, claimed=%v", err, claimed)
+	}
+	job.RepoPath = tc.TmpDir
+
+	// Exhaust retries
+	for i := range maxRetries {
+		tc.Pool.failOrRetryInner(
+			"test-worker", job, "codex",
+			"connection reset", true,
+		)
+		reclaimed, claimErr := tc.DB.ClaimJob("test-worker")
+		if claimErr != nil || reclaimed == nil {
+			t.Fatalf("re-claim after retry %d: %v", i, claimErr)
+		}
+		job = reclaimed
+	}
+
+	// Final failure — retries exhausted, backup available
+	tc.Pool.failOrRetryInner(
+		"test-worker", job, "codex",
+		"connection reset", true,
+	)
+
+	updated, err := tc.DB.GetJobByID(job.ID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	// Should be queued for failover, agent changed to "test"
+	if updated.Status != storage.JobStatusQueued {
+		t.Errorf("status=%q, want queued (failover)", updated.Status)
+	}
+	if updated.Agent != "test" {
+		t.Errorf("agent=%q, want test (failover)", updated.Agent)
 	}
 }
 
