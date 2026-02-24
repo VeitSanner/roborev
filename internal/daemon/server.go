@@ -1871,6 +1871,7 @@ func (s *Server) handleFixJob(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		ParentJobID int64  `json:"parent_job_id"`
 		Prompt      string `json:"prompt,omitempty"`       // Optional custom prompt override
+		GitRef      string `json:"git_ref,omitempty"`      // Optional: explicit ref for worktree (user-confirmed for compact jobs)
 		StaleJobID  int64  `json:"stale_job_id,omitempty"` // Optional: server looks up patch from this job for rebase
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -1951,10 +1952,34 @@ func (s *Server) handleFixJob(w http.ResponseWriter, r *http.Request) {
 	}
 	model := config.ResolveModelForWorkflow("", parentJob.RepoPath, cfg, "fix", reasoning)
 
+	// Normalize and validate user-provided git ref to prevent option
+	// injection (e.g. " --something") when passed to git worktree add.
+	req.GitRef = strings.TrimSpace(req.GitRef)
+	if req.GitRef != "" && !isValidGitRef(req.GitRef) {
+		writeError(w, http.StatusBadRequest, "invalid git_ref")
+		return
+	}
+
+	// Resolve the git ref for the fix worktree.
+	// Range refs (sha..sha) and empty refs (compact jobs) are not valid for
+	// git worktree add, so fall back to branch then "HEAD".
+	// An explicit git_ref from the request (user-confirmed via TUI) takes precedence.
+	fixGitRef := req.GitRef
+	if fixGitRef == "" && !strings.Contains(parentJob.GitRef, "..") {
+		fixGitRef = parentJob.GitRef
+	}
+	if fixGitRef == "" {
+		fixGitRef = parentJob.Branch
+	}
+	if fixGitRef == "" {
+		fixGitRef = "HEAD"
+		log.Printf("fix job for parent %d: no git ref or branch available, falling back to HEAD", req.ParentJobID)
+	}
+
 	// Enqueue the fix job
 	job, err := s.db.EnqueueJob(storage.EnqueueOpts{
 		RepoID:      parentJob.RepoID,
-		GitRef:      parentJob.GitRef,
+		GitRef:      fixGitRef,
 		Branch:      parentJob.Branch,
 		Agent:       agentName,
 		Model:       model,
@@ -1971,6 +1996,21 @@ func (s *Server) handleFixJob(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSONWithStatus(w, http.StatusCreated, job)
+}
+
+// isValidGitRef checks that a user-provided git ref is safe to pass
+// to git commands. Rejects empty strings, leading dashes (option
+// injection), and control characters.
+func isValidGitRef(ref string) bool {
+	if ref == "" || ref[0] == '-' {
+		return false
+	}
+	for _, r := range ref {
+		if r < 0x20 || r == 0x7f {
+			return false
+		}
+	}
+	return true
 }
 
 // handleGetPatch returns the stored patch for a completed fix job.

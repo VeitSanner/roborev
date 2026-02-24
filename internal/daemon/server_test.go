@@ -3565,6 +3565,7 @@ func TestHandleListJobsJobTypeFilter(t *testing.T) {
 
 func TestHandleFixJobStaleValidation(t *testing.T) {
 	server, db, tmpDir := newTestServer(t)
+	server.configWatcher.Config().FixAgent = "test"
 
 	repoDir := filepath.Join(tmpDir, "repo-fix-val")
 	testutil.InitTestGitRepo(t, repoDir)
@@ -3762,6 +3763,164 @@ func TestHandleFixJobStaleValidation(t *testing.T) {
 					)
 				}
 			})
+		}
+	})
+
+	t.Run("compact parent with empty git_ref uses branch as fallback", func(t *testing.T) {
+		// Compact jobs are stored with an empty git_ref (the label is stored separately).
+		// Fixing a compact job must not pass "" to worktree.Create — it should fall back
+		// to the branch, then "HEAD".
+		compactJob, _ := db.EnqueueJob(storage.EnqueueOpts{
+			RepoID:  repo.ID,
+			GitRef:  "", // compact jobs have no real git ref
+			Branch:  "main",
+			Agent:   "test",
+			JobType: storage.JobTypeCompact,
+			Prompt:  "consolidated findings",
+			Label:   "compact-all-20240101-120000",
+		})
+		// Force to running so CompleteJob can transition it to done.
+		db.Exec(`UPDATE review_jobs SET status = 'running' WHERE id = ?`, compactJob.ID)
+		db.CompleteJob(compactJob.ID, "test", "consolidated findings", "FAIL: issues found")
+
+		body := map[string]any{
+			"parent_job_id": compactJob.ID,
+		}
+		req := testutil.MakeJSONRequest(t, http.MethodPost, "/api/job/fix", body)
+		w := httptest.NewRecorder()
+		server.handleFixJob(w, req)
+
+		if w.Code != http.StatusCreated {
+			t.Fatalf("Expected 201 for compact parent fix, got %d: %s", w.Code, w.Body.String())
+		}
+
+		var fixJob storage.ReviewJob
+		testutil.DecodeJSON(t, w, &fixJob)
+
+		if fixJob.GitRef == "" {
+			t.Errorf("Fix job git_ref must not be empty for compact parent")
+		}
+		if fixJob.GitRef != "main" {
+			t.Errorf("Expected fix job git_ref 'main' (branch fallback), got %q", fixJob.GitRef)
+		}
+	})
+
+	t.Run("range parent uses branch instead of range ref for fix worktree", func(t *testing.T) {
+		// Range git refs like "sha1..sha2" are not valid for git worktree add.
+		// Fixing a range review should use the branch instead.
+		rangeJob, _ := db.EnqueueJob(storage.EnqueueOpts{
+			RepoID: repo.ID,
+			GitRef: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa..bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+			Branch: "feature/foo",
+			Agent:  "test",
+		})
+		db.Exec(`UPDATE review_jobs SET status = 'running' WHERE id = ?`, rangeJob.ID)
+		db.CompleteJob(rangeJob.ID, "test", "prompt", "FAIL: issues found")
+
+		body := map[string]any{
+			"parent_job_id": rangeJob.ID,
+		}
+		req := testutil.MakeJSONRequest(t, http.MethodPost, "/api/job/fix", body)
+		w := httptest.NewRecorder()
+		server.handleFixJob(w, req)
+
+		if w.Code != http.StatusCreated {
+			t.Fatalf("Expected 201 for range parent fix, got %d: %s", w.Code, w.Body.String())
+		}
+
+		var fixJob storage.ReviewJob
+		testutil.DecodeJSON(t, w, &fixJob)
+
+		if strings.Contains(fixJob.GitRef, "..") {
+			t.Errorf("Fix job git_ref must not be a range, got %q", fixJob.GitRef)
+		}
+		if fixJob.GitRef != "feature/foo" {
+			t.Errorf("Expected fix job git_ref 'feature/foo' (branch fallback), got %q", fixJob.GitRef)
+		}
+	})
+
+	t.Run("rejects git_ref starting with dash", func(t *testing.T) {
+		body := map[string]any{
+			"parent_job_id": reviewJob.ID,
+			"git_ref":       "--option-injection",
+		}
+		req := testutil.MakeJSONRequest(t, http.MethodPost, "/api/job/fix", body)
+		w := httptest.NewRecorder()
+		server.handleFixJob(w, req)
+
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("Expected 400 for dash-prefixed git_ref, got %d", w.Code)
+		}
+	})
+
+	t.Run("rejects git_ref with control chars", func(t *testing.T) {
+		body := map[string]any{
+			"parent_job_id": reviewJob.ID,
+			"git_ref":       "main\x00injected",
+		}
+		req := testutil.MakeJSONRequest(t, http.MethodPost, "/api/job/fix", body)
+		w := httptest.NewRecorder()
+		server.handleFixJob(w, req)
+
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("Expected 400 for control-char git_ref, got %d", w.Code)
+		}
+	})
+
+	t.Run("rejects whitespace-padded dash ref", func(t *testing.T) {
+		body := map[string]any{
+			"parent_job_id": reviewJob.ID,
+			"git_ref":       " --option-injection",
+		}
+		req := testutil.MakeJSONRequest(t, http.MethodPost, "/api/job/fix", body)
+		w := httptest.NewRecorder()
+		server.handleFixJob(w, req)
+
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf(
+				"Expected 400 for space+dash git_ref, got %d",
+				w.Code,
+			)
+		}
+	})
+
+	t.Run("treats whitespace-only git_ref as empty", func(t *testing.T) {
+		body := map[string]any{
+			"parent_job_id": reviewJob.ID,
+			"git_ref":       "   ",
+		}
+		req := testutil.MakeJSONRequest(t, http.MethodPost, "/api/job/fix", body)
+		w := httptest.NewRecorder()
+		server.handleFixJob(w, req)
+
+		// Whitespace-only trims to empty, so it's treated as
+		// no user-provided ref — the server falls through to
+		// the parent ref/branch/HEAD resolution chain.
+		if w.Code != http.StatusCreated {
+			t.Fatalf(
+				"Expected 201 for whitespace-only git_ref (treated as empty), got %d: %s",
+				w.Code, w.Body.String(),
+			)
+		}
+	})
+
+	t.Run("accepts valid git_ref from request", func(t *testing.T) {
+		body := map[string]any{
+			"parent_job_id": reviewJob.ID,
+			"git_ref":       "feature/my-branch",
+		}
+		req := testutil.MakeJSONRequest(t, http.MethodPost, "/api/job/fix", body)
+		w := httptest.NewRecorder()
+		server.handleFixJob(w, req)
+
+		if w.Code != http.StatusCreated {
+			t.Fatalf("Expected 201 for valid git_ref, got %d: %s", w.Code, w.Body.String())
+		}
+
+		var fixJob storage.ReviewJob
+		testutil.DecodeJSON(t, w, &fixJob)
+		if fixJob.GitRef != "feature/my-branch" {
+			t.Errorf("Expected git_ref 'feature/my-branch', got %q", fixJob.GitRef)
 		}
 	})
 
