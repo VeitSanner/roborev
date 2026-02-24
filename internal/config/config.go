@@ -216,8 +216,17 @@ type CIConfig struct {
 	// PollInterval is how often to poll for PRs (e.g., "5m", "10m"). Default: 5m
 	PollInterval string `toml:"poll_interval"`
 
-	// Repos is the list of GitHub repos to poll in "owner/repo" format
+	// Repos is the list of GitHub repos to poll in "owner/repo" format.
+	// Supports glob patterns (e.g., "myorg/*", "myorg/api-*") using path.Match syntax.
+	// The owner part must be literal — no wildcards before the "/".
 	Repos []string `toml:"repos"`
+
+	// ExcludeRepos is a list of glob patterns to exclude from the resolved repo list.
+	// Applies to both exact entries and wildcard-expanded entries.
+	ExcludeRepos []string `toml:"exclude_repos"`
+
+	// MaxRepos is a safety cap on the total number of expanded repos. Default: 100.
+	MaxRepos int `toml:"max_repos"`
 
 	// ReviewTypes is the list of review types to run for each PR (e.g., ["security", "default"]).
 	// Defaults to ["security"] if empty.
@@ -261,6 +270,15 @@ func (c *CIConfig) ResolvedAgents() []string {
 		return c.Agents
 	}
 	return []string{""}
+}
+
+// ResolvedMaxRepos returns the maximum number of repos to poll.
+// Defaults to 100 if not set or non-positive.
+func (c *CIConfig) ResolvedMaxRepos() int {
+	if c.MaxRepos > 0 {
+		return c.MaxRepos
+	}
+	return 100
 }
 
 // SyncConfig holds configuration for PostgreSQL sync

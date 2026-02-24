@@ -1256,6 +1256,64 @@ func TestResolvedAgents(t *testing.T) {
 	})
 }
 
+func TestResolvedMaxRepos(t *testing.T) {
+	tests := []struct {
+		name     string
+		maxRepos int
+		want     int
+	}{
+		{"default when zero", 0, 100},
+		{"default when negative", -5, 100},
+		{"custom value", 50, 50},
+		{"custom large value", 500, 500},
+		{"value of 1", 1, 1},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ci := CIConfig{MaxRepos: tt.maxRepos}
+			got := ci.ResolvedMaxRepos()
+			if got != tt.want {
+				t.Errorf("ResolvedMaxRepos() = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestCIConfigNewFields(t *testing.T) {
+	t.Run("parses exclude_repos and max_repos", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		configPath := filepath.Join(tmpDir, "config.toml")
+		if err := os.WriteFile(configPath, []byte(`
+[ci]
+enabled = true
+repos = ["myorg/*", "other/repo"]
+exclude_repos = ["myorg/archived-*", "myorg/internal-*"]
+max_repos = 50
+`), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		cfg, err := LoadGlobalFrom(configPath)
+		if err != nil {
+			t.Fatalf("LoadGlobalFrom: %v", err)
+		}
+
+		if len(cfg.CI.Repos) != 2 {
+			t.Errorf("got %d repos, want 2", len(cfg.CI.Repos))
+		}
+		if len(cfg.CI.ExcludeRepos) != 2 {
+			t.Errorf("got %d exclude_repos, want 2", len(cfg.CI.ExcludeRepos))
+		}
+		if cfg.CI.MaxRepos != 50 {
+			t.Errorf("got max_repos %d, want 50", cfg.CI.MaxRepos)
+		}
+		if cfg.CI.ResolvedMaxRepos() != 50 {
+			t.Errorf("ResolvedMaxRepos() = %d, want 50", cfg.CI.ResolvedMaxRepos())
+		}
+	})
+}
+
 func TestNormalizeMinSeverity(t *testing.T) {
 	tests := []struct {
 		input   string

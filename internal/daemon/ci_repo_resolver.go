@@ -1,0 +1,312 @@
+package daemon
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"log"
+	"os/exec"
+	"path"
+	"sort"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/roborev-dev/roborev/internal/config"
+)
+
+// repoRefreshInterval is the fixed interval between wildcard repo
+// re-discovery calls to the GitHub API.
+const repoRefreshInterval = time.Hour
+
+// RepoResolver expands wildcard patterns in CI repo config into concrete
+// "owner/repo" entries by querying the GitHub API via the gh CLI. Results
+// are cached for the refresh interval and automatically invalidated when
+// the config changes.
+type RepoResolver struct {
+	mu       sync.Mutex
+	cached   []string
+	hasCache bool // separate from nil check — empty results are valid cache entries
+	cachedAt time.Time
+	cacheKey string // derived from pattern+exclusion lists+max_repos for invalidation
+
+	// listReposFn is a test seam. When non-nil it replaces the real
+	// gh repo list call. Signature: (ctx, owner, env) → []nameWithOwner.
+	listReposFn func(ctx context.Context, owner string, env []string) ([]string, error)
+}
+
+// ghEnvFn produces the environment slice for gh CLI calls targeting a
+// specific owner. The caller typically passes a closure around
+// CIPoller.ghEnvForRepo.
+type ghEnvFn func(owner string) []string
+
+// Resolve returns the list of concrete "owner/repo" entries to poll.
+// It uses a cached result when the TTL has not expired and the config
+// has not changed, otherwise it re-expands wildcard patterns.
+func (r *RepoResolver) Resolve(ctx context.Context, ci *config.CIConfig, envFn ghEnvFn) ([]string, error) {
+	key := r.buildCacheKey(ci)
+	ttl := repoRefreshInterval
+
+	r.mu.Lock()
+	if r.hasCache && r.cacheKey == key && time.Since(r.cachedAt) < ttl {
+		result := make([]string, len(r.cached))
+		copy(result, r.cached)
+		r.mu.Unlock()
+		return result, nil
+	}
+	r.mu.Unlock()
+
+	repos, degraded, err := r.expand(ctx, ci, envFn)
+	if err != nil {
+		return nil, err
+	}
+
+	if degraded {
+		// API failure during wildcard expansion — prefer stale cache
+		// (which has the complete set) over the degraded partial result.
+		r.mu.Lock()
+		if r.hasCache && r.cacheKey == key {
+			stale := make([]string, len(r.cached))
+			copy(stale, r.cached)
+			r.mu.Unlock()
+			log.Printf("CI repo resolver: API degraded, using stale cache (%d repos)", len(stale))
+			return stale, nil
+		}
+		r.mu.Unlock()
+		// No stale cache for this key — return partial result.
+	} else {
+		r.mu.Lock()
+		r.cached = repos
+		r.hasCache = true
+		r.cachedAt = time.Now()
+		r.cacheKey = key
+		r.mu.Unlock()
+	}
+
+	result := make([]string, len(repos))
+	copy(result, repos)
+	return result, nil
+}
+
+// buildCacheKey creates a string that changes whenever the repo lists,
+// exclusion lists, or max_repos change, forcing a cache miss.
+func (r *RepoResolver) buildCacheKey(ci *config.CIConfig) string {
+	return strings.Join(ci.Repos, "\x00") + "\x01" +
+		strings.Join(ci.ExcludeRepos, "\x00") + "\x02" +
+		fmt.Sprintf("%d", ci.ResolvedMaxRepos())
+}
+
+// expand separates exact entries from wildcard patterns, calls the
+// GitHub API once per owner for wildcards, applies matching and
+// exclusions, deduplicates, and enforces max_repos.
+//
+// The returned degraded flag is true when one or more API calls failed
+// during wildcard expansion. The caller should avoid caching degraded
+// results so that the next poll retries the failed API calls.
+func (r *RepoResolver) expand(ctx context.Context, ci *config.CIConfig, envFn ghEnvFn) ([]string, bool, error) {
+	var exact []string
+	// owner → list of full patterns like "owner/pattern"
+	wildcardsByOwner := make(map[string][]string)
+
+	for _, entry := range ci.Repos {
+		owner, repoPattern, ok := strings.Cut(entry, "/")
+		if !ok || owner == "" {
+			log.Printf("CI repo resolver: skipping invalid entry %q (expected owner/repo)", entry)
+			continue
+		}
+		if isGlobPattern(repoPattern) {
+			wildcardsByOwner[owner] = append(wildcardsByOwner[owner], entry)
+		} else {
+			exact = append(exact, entry)
+		}
+	}
+
+	// Deduplicate exact entries
+	seen := make(map[string]bool, len(exact))
+	var exactResult []string
+	for _, e := range exact {
+		lower := strings.ToLower(e)
+		if !seen[lower] {
+			seen[lower] = true
+			exactResult = append(exactResult, e)
+		}
+	}
+
+	// Expand wildcards by owner
+	var degraded bool
+	var wildcardResult []string
+	for owner, patterns := range wildcardsByOwner {
+		if ctx.Err() != nil {
+			return nil, false, ctx.Err()
+		}
+
+		var env []string
+		if envFn != nil {
+			env = envFn(owner)
+		}
+
+		repos, err := r.callListRepos(ctx, owner, env)
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil, false, ctx.Err()
+			}
+			log.Printf("CI repo resolver: failed to list repos for %q: %v (skipping wildcards for this owner)", owner, err)
+			degraded = true
+			continue
+		}
+
+		for _, repo := range repos {
+			repoLower := strings.ToLower(repo)
+			for _, pattern := range patterns {
+				matched, matchErr := path.Match(
+					strings.ToLower(pattern), repoLower,
+				)
+				if matchErr != nil {
+					log.Printf("CI repo resolver: invalid pattern %q: %v", pattern, matchErr)
+					continue
+				}
+				if matched {
+					if !seen[repoLower] {
+						seen[repoLower] = true
+						wildcardResult = append(wildcardResult, repo)
+					}
+					break // no need to match other patterns for same repo
+				}
+			}
+		}
+	}
+
+	// Apply exclusions to both sets
+	exactResult = applyExclusions(exactResult, ci.ExcludeRepos)
+	wildcardResult = applyExclusions(wildcardResult, ci.ExcludeRepos)
+
+	// Enforce max_repos: explicit repos have priority over wildcard-expanded repos.
+	maxRepos := ci.ResolvedMaxRepos()
+	total := len(exactResult) + len(wildcardResult)
+
+	if total > maxRepos {
+		// Sort wildcards for deterministic truncation
+		sort.Strings(wildcardResult)
+
+		remaining := maxRepos - len(exactResult)
+		if remaining <= 0 {
+			// Even exact repos exceed limit — truncate exact too
+			sort.Strings(exactResult)
+			exactResult = exactResult[:maxRepos]
+			wildcardResult = nil
+		} else if len(wildcardResult) > remaining {
+			wildcardResult = wildcardResult[:remaining]
+		}
+
+		log.Printf("CI repo resolver: expanded to %d repos, truncating to max_repos=%d (keeping %d explicit)", total, maxRepos, len(exactResult))
+	}
+
+	// Combine and sort for deterministic output
+	result := make([]string, 0, len(exactResult)+len(wildcardResult))
+	result = append(result, exactResult...)
+	result = append(result, wildcardResult...)
+	sort.Strings(result)
+
+	return result, degraded, nil
+}
+
+// callListRepos invokes the gh CLI or the test seam to list repos for an owner.
+func (r *RepoResolver) callListRepos(ctx context.Context, owner string, env []string) ([]string, error) {
+	if r.listReposFn != nil {
+		return r.listReposFn(ctx, owner, env)
+	}
+	return ghListRepos(ctx, owner, env)
+}
+
+// ghRepoEntry represents a single entry from `gh repo list --json`.
+type ghRepoEntry struct {
+	NameWithOwner string `json:"nameWithOwner"`
+}
+
+// ghListRepos calls `gh repo list <owner> --json nameWithOwner --no-archived --limit 1000`
+// and returns the list of "owner/repo" strings.
+func ghListRepos(ctx context.Context, owner string, env []string) ([]string, error) {
+	cmd := exec.CommandContext(ctx, "gh", "repo", "list", owner,
+		"--json", "nameWithOwner",
+		"--no-archived",
+		"--limit", "1000",
+	)
+	if env != nil {
+		cmd.Env = env
+	}
+	out, err := cmd.Output()
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			return nil, fmt.Errorf("gh repo list %s: %s", owner, string(exitErr.Stderr))
+		}
+		return nil, fmt.Errorf("gh repo list %s: %w", owner, err)
+	}
+
+	var entries []ghRepoEntry
+	if err := json.Unmarshal(out, &entries); err != nil {
+		return nil, fmt.Errorf("parse gh repo list output for %s: %w", owner, err)
+	}
+
+	repos := make([]string, len(entries))
+	for i, e := range entries {
+		repos[i] = e.NameWithOwner
+	}
+	return repos, nil
+}
+
+// applyExclusions filters repos matching any of the exclusion patterns.
+// Matching is case-insensitive. Invalid patterns are logged once and skipped.
+func applyExclusions(repos []string, patterns []string) []string {
+	if len(patterns) == 0 {
+		return repos
+	}
+
+	// Pre-validate and lowercase patterns once to avoid repeated
+	// error logging inside the inner loop.
+	valid := make([]string, 0, len(patterns))
+	for _, p := range patterns {
+		lower := strings.ToLower(p)
+		if _, err := path.Match(lower, ""); err != nil {
+			log.Printf("CI repo resolver: invalid exclusion pattern %q: %v", p, err)
+			continue
+		}
+		valid = append(valid, lower)
+	}
+	if len(valid) == 0 {
+		return repos
+	}
+
+	filtered := repos[:0]
+	for _, repo := range repos {
+		repoLower := strings.ToLower(repo)
+		excluded := false
+		for _, pattern := range valid {
+			if matched, _ := path.Match(pattern, repoLower); matched {
+				excluded = true
+				break
+			}
+		}
+		if !excluded {
+			filtered = append(filtered, repo)
+		}
+	}
+	return filtered
+}
+
+// isGlobPattern returns true if the string contains glob metacharacters.
+func isGlobPattern(s string) bool {
+	return strings.ContainsAny(s, "*?[")
+}
+
+// ExactReposOnly returns the subset of ci.Repos that are exact entries
+// (no glob characters). Used as a fallback when resolver expansion fails.
+func ExactReposOnly(repos []string) []string {
+	var exact []string
+	for _, entry := range repos {
+		owner, repoPattern, ok := strings.Cut(entry, "/")
+		if ok && owner != "" && !isGlobPattern(repoPattern) {
+			exact = append(exact, entry)
+		}
+	}
+	return exact
+}

@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -57,6 +58,8 @@ type CIPoller struct {
 	agentResolverFn   func(name string) (string, error) // returns resolved agent name
 	jobCancelFn       func(jobID int64)                 // kills running worker process (optional)
 
+	repoResolver *RepoResolver
+
 	subID      int // broadcaster subscription ID for event listening
 	stopCh     chan struct{}
 	doneCh     chan struct{}
@@ -80,6 +83,7 @@ func NewCIPoller(db *storage.DB, cfgGetter ConfigGetter, broadcaster Broadcaster
 	p.mergeBaseFn = gitpkg.GetMergeBase
 	p.postPRCommentFn = p.postPRComment
 	p.synthesizeFn = p.synthesizeBatchResults
+	p.repoResolver = &RepoResolver{}
 
 	cfg := cfgGetter.Config()
 	if cfg.CI.GitHubAppConfigured() {
@@ -196,7 +200,20 @@ func (p *CIPoller) run(ctx context.Context, stopCh, doneCh chan struct{}, interv
 
 func (p *CIPoller) poll(ctx context.Context) {
 	cfg := p.cfgGetter.Config()
-	for _, ghRepo := range cfg.CI.Repos {
+
+	repos, err := p.repoResolver.Resolve(ctx, &cfg.CI, func(owner string) []string {
+		return p.ghEnvForRepo(owner + "/_") // ghEnvForRepo only uses the owner part
+	})
+	if err != nil {
+		log.Printf("CI poller: repo resolver error: %v (falling back to exact entries)", err)
+		repos = applyExclusions(ExactReposOnly(cfg.CI.Repos), cfg.CI.ExcludeRepos)
+		if maxRepos := cfg.CI.ResolvedMaxRepos(); len(repos) > maxRepos {
+			sort.Strings(repos)
+			repos = repos[:maxRepos]
+		}
+	}
+
+	for _, ghRepo := range repos {
 		if err := p.pollRepo(ctx, ghRepo, cfg); err != nil {
 			log.Printf("CI poller: error polling %s: %v", ghRepo, err)
 		}
