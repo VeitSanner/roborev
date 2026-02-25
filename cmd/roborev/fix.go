@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -17,6 +19,7 @@ import (
 	"github.com/roborev-dev/roborev/internal/daemon"
 	"github.com/roborev-dev/roborev/internal/git"
 	"github.com/roborev-dev/roborev/internal/storage"
+	"github.com/roborev-dev/roborev/internal/streamfmt"
 	"github.com/spf13/cobra"
 )
 
@@ -568,6 +571,20 @@ func runFixList(cmd *cobra.Command, branch string, newestFirst bool) error {
 	return nil
 }
 
+// isConnectionError checks if an error indicates a network/connection failure
+// (as opposed to an application-level error like 404 or invalid response).
+func isConnectionError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) {
+		return true
+	}
+	var netErr net.Error
+	return errors.As(err, &netErr)
+}
+
 // truncateString truncates s to maxLen characters, adding "..." if truncated.
 // It operates on Unicode runes to avoid cutting multi-byte characters.
 func truncateString(s string, maxLen int) string {
@@ -620,7 +637,7 @@ func fixSingleJob(cmd *cobra.Command, repoRoot string, jobID int64, opts fixOpti
 	if !opts.quiet {
 		cmd.Printf("Job %d analysis output:\n", jobID)
 		cmd.Println(strings.Repeat("-", 60))
-		printMarkdownOrPlain(cmd.OutOrStdout(), review.Output)
+		streamfmt.PrintMarkdownOrPlain(cmd.OutOrStdout(), review.Output)
 		cmd.Println(strings.Repeat("-", 60))
 		cmd.Println()
 	}
@@ -637,11 +654,11 @@ func fixSingleJob(cmd *cobra.Command, repoRoot string, jobID int64, opts fixOpti
 
 	// Set up output
 	var out io.Writer
-	var fmtr *streamFormatter
+	var fmtr *streamfmt.Formatter
 	if opts.quiet {
 		out = io.Discard
 	} else {
-		fmtr = newStreamFormatter(cmd.OutOrStdout(), writerIsTerminal(cmd.OutOrStdout()))
+		fmtr = streamfmt.New(cmd.OutOrStdout(), streamfmt.WriterIsTerminal(cmd.OutOrStdout()))
 		out = fmtr
 	}
 
@@ -814,7 +831,7 @@ func runFixBatch(cmd *cobra.Command, jobIDs []int64, branch string, newestFirst 
 			for _, e := range batch {
 				cmd.Printf("Job %d findings:\n", e.jobID)
 				cmd.Println(strings.Repeat("-", 60))
-				printMarkdownOrPlain(w, e.review.Output)
+				streamfmt.PrintMarkdownOrPlain(w, e.review.Output)
 				cmd.Println(strings.Repeat("-", 60))
 				cmd.Println()
 			}
@@ -824,11 +841,11 @@ func runFixBatch(cmd *cobra.Command, jobIDs []int64, branch string, newestFirst 
 		prompt := buildBatchFixPrompt(batch)
 
 		var out io.Writer
-		var fmtr *streamFormatter
+		var fmtr *streamfmt.Formatter
 		if opts.quiet {
 			out = io.Discard
 		} else {
-			fmtr = newStreamFormatter(cmd.OutOrStdout(), writerIsTerminal(cmd.OutOrStdout()))
+			fmtr = streamfmt.New(cmd.OutOrStdout(), streamfmt.WriterIsTerminal(cmd.OutOrStdout()))
 			out = fmtr
 		}
 

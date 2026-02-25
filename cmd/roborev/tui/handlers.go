@@ -1,8 +1,10 @@
-package main
+package tui
 
 import (
+	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"strings"
 	"time"
 	"unicode"
@@ -10,29 +12,30 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/roborev-dev/roborev/internal/git"
 	"github.com/roborev-dev/roborev/internal/storage"
+	"github.com/roborev-dev/roborev/internal/streamfmt"
 	"github.com/roborev-dev/roborev/internal/version"
 )
 
 // handleKeyMsg dispatches key events to view-specific handlers.
-func (m tuiModel) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m model) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// Fix panel captures input when focused in review view
-	if m.currentView == tuiViewReview && m.reviewFixPanelOpen && m.reviewFixPanelFocused {
+	if m.currentView == viewReview && m.reviewFixPanelOpen && m.reviewFixPanelFocused {
 		return m.handleReviewFixPanelKey(msg)
 	}
 
 	// Modal views that capture most keys for typing
 	switch m.currentView {
-	case tuiViewComment:
+	case viewKindComment:
 		return m.handleCommentKey(msg)
-	case tuiViewFilter:
+	case viewFilter:
 		return m.handleFilterKey(msg)
-	case tuiViewLog:
+	case viewLog:
 		return m.handleLogKey(msg)
-	case tuiViewWorktreeConfirm:
+	case viewKindWorktreeConfirm:
 		return m.handleWorktreeConfirmKey(msg)
-	case tuiViewTasks:
+	case viewTasks:
 		return m.handleTasksKey(msg)
-	case tuiViewPatch:
+	case viewPatch:
 		return m.handlePatchKey(msg)
 	}
 
@@ -41,7 +44,7 @@ func (m tuiModel) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 // handleCommentKey handles key input in the comment modal.
-func (m tuiModel) handleCommentKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m model) handleCommentKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "ctrl+c":
 		return m, tea.Quit
@@ -79,12 +82,12 @@ func (m tuiModel) handleCommentKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 // handleFilterKey handles key input in the unified tree filter modal.
-func (m tuiModel) handleFilterKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m model) handleFilterKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "ctrl+c":
 		return m, tea.Quit
 	case "esc", "q":
-		m.currentView = tuiViewQueue
+		m.currentView = viewQueue
 		m.filterSearch = ""
 		m.filterBranchMode = false
 		return m, nil
@@ -188,7 +191,7 @@ func (m tuiModel) handleFilterKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.pushFilter(filterTypeBranch)
 			}
 		}
-		m.currentView = tuiViewQueue
+		m.currentView = viewQueue
 		m.filterSearch = ""
 		m.filterBranchMode = false
 		m.hasMore = false
@@ -225,7 +228,7 @@ func (m tuiModel) handleFilterKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 // clearFetchFailed resets fetchFailed on all tree nodes so that
 // changed search text retries previously failed repos.
-func (m *tuiModel) clearFetchFailed() {
+func (m *model) clearFetchFailed() {
 	for i := range m.filterTree {
 		m.filterTree[i].fetchFailed = false
 	}
@@ -241,8 +244,8 @@ const maxSearchBranchFetches = 5
 // this, searching for a branch name only matches already-expanded
 // repos. At most maxSearchBranchFetches total requests are allowed
 // in-flight at once; completions trigger top-up fetches via the
-// tuiRepoBranchesMsg handler.
-func (m *tuiModel) fetchUnloadedBranches() tea.Cmd {
+// repoBranchesMsg handler.
+func (m *model) fetchUnloadedBranches() tea.Cmd {
 	if m.filterSearch == "" {
 		return nil
 	}
@@ -276,7 +279,7 @@ func (m *tuiModel) fetchUnloadedBranches() tea.Cmd {
 }
 
 // handleLogKey handles key input in the log view.
-func (m tuiModel) handleLogKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m model) handleLogKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "ctrl+c":
 		return m, tea.Quit
@@ -344,7 +347,7 @@ func (m tuiModel) handleLogKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleNextKey()
 	case "?":
 		m.helpFromView = m.currentView
-		m.currentView = tuiViewHelp
+		m.currentView = viewHelp
 		m.helpScroll = 0
 		return m, nil
 	}
@@ -352,7 +355,7 @@ func (m tuiModel) handleLogKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 // handleGlobalKey handles keys shared across queue, review, prompt, commit msg, and help views.
-func (m tuiModel) handleGlobalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m model) handleGlobalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "ctrl+c", "q":
 		return m.handleQuitKey()
@@ -408,70 +411,70 @@ func (m tuiModel) handleGlobalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m tuiModel) handleQuitKey() (tea.Model, tea.Cmd) {
-	if m.currentView == tuiViewReview {
+func (m model) handleQuitKey() (tea.Model, tea.Cmd) {
+	if m.currentView == viewReview {
 		returnTo := m.reviewFromView
 		if returnTo == 0 {
-			returnTo = tuiViewQueue
+			returnTo = viewQueue
 		}
 		m.closeFixPanel()
 		m.currentView = returnTo
 		m.currentReview = nil
 		m.reviewScroll = 0
 		m.paginateNav = 0
-		if returnTo == tuiViewQueue {
+		if returnTo == viewQueue {
 			m.normalizeSelectionIfHidden()
 		}
 		return m, nil
 	}
-	if m.currentView == tuiViewPrompt {
+	if m.currentView == viewKindPrompt {
 		m.paginateNav = 0
 		if m.promptFromQueue {
-			m.currentView = tuiViewQueue
+			m.currentView = viewQueue
 			m.currentReview = nil
 			m.promptScroll = 0
 		} else {
-			m.currentView = tuiViewReview
+			m.currentView = viewReview
 			m.promptScroll = 0
 		}
 		return m, nil
 	}
-	if m.currentView == tuiViewCommitMsg {
+	if m.currentView == viewCommitMsg {
 		m.currentView = m.commitMsgFromView
 		m.commitMsgContent = ""
 		m.commitMsgScroll = 0
 		return m, nil
 	}
-	if m.currentView == tuiViewHelp {
+	if m.currentView == viewHelp {
 		m.currentView = m.helpFromView
 		return m, nil
 	}
 	return m, tea.Quit
 }
 
-func (m tuiModel) handleHomeKey() (tea.Model, tea.Cmd) {
+func (m model) handleHomeKey() (tea.Model, tea.Cmd) {
 	switch m.currentView {
-	case tuiViewQueue:
+	case viewQueue:
 		firstVisible := m.findFirstVisibleJob()
 		if firstVisible >= 0 {
 			m.selectedIdx = firstVisible
 			m.updateSelectedJobID()
 		}
-	case tuiViewReview:
+	case viewReview:
 		m.reviewScroll = 0
-	case tuiViewPrompt:
+	case viewKindPrompt:
 		m.promptScroll = 0
-	case tuiViewCommitMsg:
+	case viewCommitMsg:
 		m.commitMsgScroll = 0
-	case tuiViewHelp:
+	case viewHelp:
 		m.helpScroll = 0
 	}
 	return m, nil
 }
 
-func (m tuiModel) handleUpKey() (tea.Model, tea.Cmd) {
+func (m model) handleUpKey() (tea.Model, tea.Cmd) {
 	switch m.currentView {
-	case tuiViewQueue:
+	case viewQueue:
 		prevIdx := m.findPrevVisibleJob(m.selectedIdx)
 		if prevIdx >= 0 {
 			m.selectedIdx = prevIdx
@@ -479,21 +482,21 @@ func (m tuiModel) handleUpKey() (tea.Model, tea.Cmd) {
 		} else {
 			m.flashMessage = "No newer review"
 			m.flashExpiresAt = time.Now().Add(2 * time.Second)
-			m.flashView = tuiViewQueue
+			m.flashView = viewQueue
 		}
-	case tuiViewReview:
+	case viewReview:
 		if m.reviewScroll > 0 {
 			m.reviewScroll--
 		}
-	case tuiViewPrompt:
+	case viewKindPrompt:
 		if m.promptScroll > 0 {
 			m.promptScroll--
 		}
-	case tuiViewCommitMsg:
+	case viewCommitMsg:
 		if m.commitMsgScroll > 0 {
 			m.commitMsgScroll--
 		}
-	case tuiViewHelp:
+	case viewHelp:
 		if m.helpScroll > 0 {
 			m.helpScroll--
 		}
@@ -501,15 +504,15 @@ func (m tuiModel) handleUpKey() (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m tuiModel) handlePrevKey() (tea.Model, tea.Cmd) {
+func (m model) handlePrevKey() (tea.Model, tea.Cmd) {
 	switch m.currentView {
-	case tuiViewQueue:
+	case viewQueue:
 		prevIdx := m.findPrevVisibleJob(m.selectedIdx)
 		if prevIdx >= 0 {
 			m.selectedIdx = prevIdx
 			m.updateSelectedJobID()
 		}
-	case tuiViewReview:
+	case viewReview:
 		prevIdx := m.findPrevViewableJob()
 		if prevIdx >= 0 {
 			m.closeFixPanel()
@@ -531,9 +534,9 @@ func (m tuiModel) handlePrevKey() (tea.Model, tea.Cmd) {
 		} else {
 			m.flashMessage = "No newer review"
 			m.flashExpiresAt = time.Now().Add(2 * time.Second)
-			m.flashView = tuiViewReview
+			m.flashView = viewReview
 		}
-	case tuiViewPrompt:
+	case viewKindPrompt:
 		prevIdx := m.findPrevPromptableJob()
 		if prevIdx >= 0 {
 			m.selectedIdx = prevIdx
@@ -552,17 +555,17 @@ func (m tuiModel) handlePrevKey() (tea.Model, tea.Cmd) {
 		} else {
 			m.flashMessage = "No newer review"
 			m.flashExpiresAt = time.Now().Add(2 * time.Second)
-			m.flashView = tuiViewPrompt
+			m.flashView = viewKindPrompt
 		}
-	case tuiViewLog:
-		if m.logFromView == tuiViewTasks {
+	case viewLog:
+		if m.logFromView == viewTasks {
 			idx := m.findPrevLoggableFixJob()
 			if idx >= 0 {
 				m.fixSelectedIdx = idx
 				job := m.fixJobs[idx]
 				m.logStreaming = false
 				return m.openLogView(
-					job.ID, job.Status, tuiViewTasks,
+					job.ID, job.Status, viewTasks,
 				)
 			}
 		} else {
@@ -579,14 +582,14 @@ func (m tuiModel) handlePrevKey() (tea.Model, tea.Cmd) {
 		}
 		m.flashMessage = "No newer log"
 		m.flashExpiresAt = time.Now().Add(2 * time.Second)
-		m.flashView = tuiViewLog
+		m.flashView = viewLog
 	}
 	return m, nil
 }
 
-func (m tuiModel) handleDownKey() (tea.Model, tea.Cmd) {
+func (m model) handleDownKey() (tea.Model, tea.Cmd) {
 	switch m.currentView {
-	case tuiViewQueue:
+	case viewQueue:
 		nextIdx := m.findNextVisibleJob(m.selectedIdx)
 		if nextIdx >= 0 {
 			m.selectedIdx = nextIdx
@@ -597,29 +600,29 @@ func (m tuiModel) handleDownKey() (tea.Model, tea.Cmd) {
 		} else if !m.hasMore || len(m.activeRepoFilter) > 1 {
 			m.flashMessage = "No older review"
 			m.flashExpiresAt = time.Now().Add(2 * time.Second)
-			m.flashView = tuiViewQueue
+			m.flashView = viewQueue
 		}
-	case tuiViewReview:
+	case viewReview:
 		m.reviewScroll++
 		if m.mdCache != nil && m.reviewScroll > m.mdCache.lastReviewMaxScroll {
 			m.reviewScroll = m.mdCache.lastReviewMaxScroll
 		}
-	case tuiViewPrompt:
+	case viewKindPrompt:
 		m.promptScroll++
 		if m.mdCache != nil && m.promptScroll > m.mdCache.lastPromptMaxScroll {
 			m.promptScroll = m.mdCache.lastPromptMaxScroll
 		}
-	case tuiViewCommitMsg:
+	case viewCommitMsg:
 		m.commitMsgScroll++
-	case tuiViewHelp:
+	case viewHelp:
 		m.helpScroll = min(m.helpScroll+1, m.helpMaxScroll())
 	}
 	return m, nil
 }
 
-func (m tuiModel) handleNextKey() (tea.Model, tea.Cmd) {
+func (m model) handleNextKey() (tea.Model, tea.Cmd) {
 	switch m.currentView {
-	case tuiViewQueue:
+	case viewQueue:
 		nextIdx := m.findNextVisibleJob(m.selectedIdx)
 		if nextIdx >= 0 {
 			m.selectedIdx = nextIdx
@@ -628,7 +631,7 @@ func (m tuiModel) handleNextKey() (tea.Model, tea.Cmd) {
 			m.loadingMore = true
 			return m, m.fetchMoreJobs()
 		}
-	case tuiViewReview:
+	case viewReview:
 		nextIdx := m.findNextViewableJob()
 		if nextIdx >= 0 {
 			m.closeFixPanel()
@@ -649,14 +652,14 @@ func (m tuiModel) handleNextKey() (tea.Model, tea.Cmd) {
 			}
 		} else if m.canPaginate() {
 			m.loadingMore = true
-			m.paginateNav = tuiViewReview
+			m.paginateNav = viewReview
 			return m, m.fetchMoreJobs()
 		} else {
 			m.flashMessage = "No older review"
 			m.flashExpiresAt = time.Now().Add(2 * time.Second)
-			m.flashView = tuiViewReview
+			m.flashView = viewReview
 		}
-	case tuiViewPrompt:
+	case viewKindPrompt:
 		nextIdx := m.findNextPromptableJob()
 		if nextIdx >= 0 {
 			m.selectedIdx = nextIdx
@@ -674,22 +677,22 @@ func (m tuiModel) handleNextKey() (tea.Model, tea.Cmd) {
 			}
 		} else if m.canPaginate() {
 			m.loadingMore = true
-			m.paginateNav = tuiViewPrompt
+			m.paginateNav = viewKindPrompt
 			return m, m.fetchMoreJobs()
 		} else {
 			m.flashMessage = "No older review"
 			m.flashExpiresAt = time.Now().Add(2 * time.Second)
-			m.flashView = tuiViewPrompt
+			m.flashView = viewKindPrompt
 		}
-	case tuiViewLog:
-		if m.logFromView == tuiViewTasks {
+	case viewLog:
+		if m.logFromView == viewTasks {
 			idx := m.findNextLoggableFixJob()
 			if idx >= 0 {
 				m.fixSelectedIdx = idx
 				job := m.fixJobs[idx]
 				m.logStreaming = false
 				return m.openLogView(
-					job.ID, job.Status, tuiViewTasks,
+					job.ID, job.Status, viewTasks,
 				)
 			}
 		} else {
@@ -704,21 +707,21 @@ func (m tuiModel) handleNextKey() (tea.Model, tea.Cmd) {
 				)
 			} else if m.canPaginate() {
 				m.loadingMore = true
-				m.paginateNav = tuiViewLog
+				m.paginateNav = viewLog
 				return m, m.fetchMoreJobs()
 			}
 		}
 		m.flashMessage = "No older log"
 		m.flashExpiresAt = time.Now().Add(2 * time.Second)
-		m.flashView = tuiViewLog
+		m.flashView = viewLog
 	}
 	return m, nil
 }
 
-func (m tuiModel) handlePageUpKey() (tea.Model, tea.Cmd) {
+func (m model) handlePageUpKey() (tea.Model, tea.Cmd) {
 	pageSize := max(1, m.height-10)
 	switch m.currentView {
-	case tuiViewQueue:
+	case viewQueue:
 		for range pageSize {
 			prevIdx := m.findPrevVisibleJob(m.selectedIdx)
 			if prevIdx < 0 {
@@ -727,28 +730,28 @@ func (m tuiModel) handlePageUpKey() (tea.Model, tea.Cmd) {
 			m.selectedIdx = prevIdx
 		}
 		m.updateSelectedJobID()
-	case tuiViewReview:
+	case viewReview:
 		if m.mdCache != nil && m.reviewScroll > m.mdCache.lastReviewMaxScroll {
 			m.reviewScroll = m.mdCache.lastReviewMaxScroll
 		}
 		m.reviewScroll = max(0, m.reviewScroll-pageSize)
 		return m, tea.ClearScreen
-	case tuiViewPrompt:
+	case viewKindPrompt:
 		if m.mdCache != nil && m.promptScroll > m.mdCache.lastPromptMaxScroll {
 			m.promptScroll = m.mdCache.lastPromptMaxScroll
 		}
 		m.promptScroll = max(0, m.promptScroll-pageSize)
 		return m, tea.ClearScreen
-	case tuiViewHelp:
+	case viewHelp:
 		m.helpScroll = max(0, m.helpScroll-pageSize)
 	}
 	return m, nil
 }
 
-func (m tuiModel) handlePageDownKey() (tea.Model, tea.Cmd) {
+func (m model) handlePageDownKey() (tea.Model, tea.Cmd) {
 	pageSize := max(1, m.height-10)
 	switch m.currentView {
-	case tuiViewQueue:
+	case viewQueue:
 		reachedEnd := false
 		for range pageSize {
 			nextIdx := m.findNextVisibleJob(m.selectedIdx)
@@ -763,32 +766,32 @@ func (m tuiModel) handlePageDownKey() (tea.Model, tea.Cmd) {
 			m.loadingMore = true
 			return m, m.fetchMoreJobs()
 		}
-	case tuiViewReview:
+	case viewReview:
 		m.reviewScroll += pageSize
 		if m.mdCache != nil && m.reviewScroll > m.mdCache.lastReviewMaxScroll {
 			m.reviewScroll = m.mdCache.lastReviewMaxScroll
 		}
 		return m, tea.ClearScreen
-	case tuiViewPrompt:
+	case viewKindPrompt:
 		m.promptScroll += pageSize
 		if m.mdCache != nil && m.promptScroll > m.mdCache.lastPromptMaxScroll {
 			m.promptScroll = m.mdCache.lastPromptMaxScroll
 		}
 		return m, tea.ClearScreen
-	case tuiViewHelp:
+	case viewHelp:
 		m.helpScroll = min(m.helpScroll+pageSize, m.helpMaxScroll())
 	}
 	return m, nil
 }
 
-func (m tuiModel) handleEnterKey() (tea.Model, tea.Cmd) {
-	if m.currentView != tuiViewQueue || len(m.jobs) == 0 || m.selectedIdx < 0 || m.selectedIdx >= len(m.jobs) {
+func (m model) handleEnterKey() (tea.Model, tea.Cmd) {
+	if m.currentView != viewQueue || len(m.jobs) == 0 || m.selectedIdx < 0 || m.selectedIdx >= len(m.jobs) {
 		return m, nil
 	}
 	job := m.jobs[m.selectedIdx]
 	switch job.Status {
 	case storage.JobStatusDone:
-		m.reviewFromView = tuiViewQueue
+		m.reviewFromView = viewQueue
 		return m, m.fetchReview(job.ID)
 	case storage.JobStatusFailed:
 		m.currentBranch = ""
@@ -797,8 +800,8 @@ func (m tuiModel) handleEnterKey() (tea.Model, tea.Cmd) {
 			Output: "Job failed:\n\n" + job.Error,
 			Job:    &job,
 		}
-		m.reviewFromView = tuiViewQueue
-		m.currentView = tuiViewReview
+		m.reviewFromView = viewQueue
+		m.currentView = viewReview
 		m.reviewScroll = 0
 		return m, nil
 	}
@@ -815,12 +818,12 @@ func (m tuiModel) handleEnterKey() (tea.Model, tea.Cmd) {
 	}
 	m.flashMessage = fmt.Sprintf("Job #%d is %s — no review yet", job.ID, status)
 	m.flashExpiresAt = time.Now().Add(2 * time.Second)
-	m.flashView = tuiViewQueue
+	m.flashView = viewQueue
 	return m, nil
 }
 
-func (m tuiModel) handlePromptKey() (tea.Model, tea.Cmd) {
-	if m.currentView == tuiViewQueue && len(m.jobs) > 0 && m.selectedIdx >= 0 && m.selectedIdx < len(m.jobs) {
+func (m model) handlePromptKey() (tea.Model, tea.Cmd) {
+	if m.currentView == viewQueue && len(m.jobs) > 0 && m.selectedIdx >= 0 && m.selectedIdx < len(m.jobs) {
 		job := m.jobs[m.selectedIdx]
 		if job.Status == storage.JobStatusDone {
 			m.promptFromQueue = true
@@ -831,31 +834,31 @@ func (m tuiModel) handlePromptKey() (tea.Model, tea.Cmd) {
 				Prompt: job.Prompt,
 				Job:    &job,
 			}
-			m.currentView = tuiViewPrompt
+			m.currentView = viewKindPrompt
 			m.promptScroll = 0
 			m.promptFromQueue = true
 			return m, nil
 		}
-	} else if m.currentView == tuiViewReview && m.currentReview != nil && m.currentReview.Prompt != "" {
+	} else if m.currentView == viewReview && m.currentReview != nil && m.currentReview.Prompt != "" {
 		m.closeFixPanel()
-		m.currentView = tuiViewPrompt
+		m.currentView = viewKindPrompt
 		m.promptScroll = 0
 		m.promptFromQueue = false
-	} else if m.currentView == tuiViewPrompt {
+	} else if m.currentView == viewKindPrompt {
 		if m.promptFromQueue {
-			m.currentView = tuiViewQueue
+			m.currentView = viewQueue
 			m.currentReview = nil
 			m.promptScroll = 0
 		} else {
-			m.currentView = tuiViewReview
+			m.currentView = viewReview
 			m.promptScroll = 0
 		}
 	}
 	return m, nil
 }
 
-func (m tuiModel) handleAddressedKey() (tea.Model, tea.Cmd) {
-	if m.currentView == tuiViewReview && m.currentReview != nil && m.currentReview.ID > 0 {
+func (m model) handleAddressedKey() (tea.Model, tea.Cmd) {
+	if m.currentView == viewReview && m.currentReview != nil && m.currentReview.ID > 0 {
 		oldState := m.currentReview.Addressed
 		newState := !oldState
 		m.addressedSeq++
@@ -871,7 +874,7 @@ func (m tuiModel) handleAddressedKey() (tea.Model, tea.Cmd) {
 			m.pendingReviewAddressed[m.currentReview.ID] = pendingState{newState: newState, seq: seq}
 		}
 		return m, m.addressReview(m.currentReview.ID, jobID, newState, oldState, seq)
-	} else if m.currentView == tuiViewQueue && len(m.jobs) > 0 && m.selectedIdx >= 0 && m.selectedIdx < len(m.jobs) {
+	} else if m.currentView == viewQueue && len(m.jobs) > 0 && m.selectedIdx >= 0 && m.selectedIdx < len(m.jobs) {
 		job := &m.jobs[m.selectedIdx]
 		if job.Status == storage.JobStatusDone && job.Addressed != nil {
 			oldState := *job.Addressed
@@ -900,8 +903,8 @@ func (m tuiModel) handleAddressedKey() (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m tuiModel) handleCancelKey() (tea.Model, tea.Cmd) {
-	if m.currentView != tuiViewQueue || len(m.jobs) == 0 || m.selectedIdx < 0 || m.selectedIdx >= len(m.jobs) {
+func (m model) handleCancelKey() (tea.Model, tea.Cmd) {
+	if m.currentView != viewQueue || len(m.jobs) == 0 || m.selectedIdx < 0 || m.selectedIdx >= len(m.jobs) {
 		return m, nil
 	}
 	job := &m.jobs[m.selectedIdx]
@@ -930,8 +933,8 @@ func (m tuiModel) handleCancelKey() (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m tuiModel) handleRerunKey() (tea.Model, tea.Cmd) {
-	if m.currentView != tuiViewQueue || len(m.jobs) == 0 || m.selectedIdx < 0 || m.selectedIdx >= len(m.jobs) {
+func (m model) handleRerunKey() (tea.Model, tea.Cmd) {
+	if m.currentView != viewQueue || len(m.jobs) == 0 || m.selectedIdx < 0 || m.selectedIdx >= len(m.jobs) {
 		return m, nil
 	}
 	job := &m.jobs[m.selectedIdx]
@@ -949,14 +952,14 @@ func (m tuiModel) handleRerunKey() (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m tuiModel) handleLogKey2() (tea.Model, tea.Cmd) {
+func (m model) handleLogKey2() (tea.Model, tea.Cmd) {
 	// From prompt view: view log for the job being viewed
-	if m.currentView == tuiViewPrompt && m.currentReview != nil && m.currentReview.Job != nil {
+	if m.currentView == viewKindPrompt && m.currentReview != nil && m.currentReview.Job != nil {
 		job := m.currentReview.Job
 		return m.openLogView(job.ID, job.Status, m.reviewFromView)
 	}
 
-	if m.currentView != tuiViewQueue || len(m.jobs) == 0 || m.selectedIdx < 0 || m.selectedIdx >= len(m.jobs) {
+	if m.currentView != viewQueue || len(m.jobs) == 0 || m.selectedIdx < 0 || m.selectedIdx >= len(m.jobs) {
 		return m, nil
 	}
 	job := m.jobs[m.selectedIdx]
@@ -964,25 +967,25 @@ func (m tuiModel) handleLogKey2() (tea.Model, tea.Cmd) {
 	case storage.JobStatusQueued:
 		m.flashMessage = "Job is queued - not yet running"
 		m.flashExpiresAt = time.Now().Add(2 * time.Second)
-		m.flashView = tuiViewQueue
+		m.flashView = viewQueue
 		return m, nil
 	default:
-		return m.openLogView(job.ID, job.Status, tuiViewQueue)
+		return m.openLogView(job.ID, job.Status, viewQueue)
 	}
 }
 
 // openLogView opens the log view for a job of any status.
 // Running jobs stream with follow; completed jobs show a static view.
-func (m tuiModel) openLogView(
-	jobID int64, status storage.JobStatus, fromView tuiView,
+func (m model) openLogView(
+	jobID int64, status storage.JobStatus, fromView viewKind,
 ) (tea.Model, tea.Cmd) {
 	m.logJobID = jobID
 	m.logLines = nil
 	m.logScroll = 0
 	m.logFromView = fromView
-	m.currentView = tuiViewLog
+	m.currentView = viewLog
 	m.logOffset = 0
-	m.logFmtr = newStreamFormatterWithWidth(
+	m.logFmtr = streamfmt.NewWithWidth(
 		io.Discard, m.width, m.glamourStyle,
 	)
 	m.logFetchSeq++
@@ -999,8 +1002,8 @@ func (m tuiModel) openLogView(
 	return m, tea.Batch(tea.ClearScreen, m.fetchJobLog(jobID))
 }
 
-func (m tuiModel) handleFilterOpenKey() (tea.Model, tea.Cmd) {
-	if m.currentView != tuiViewQueue {
+func (m model) handleFilterOpenKey() (tea.Model, tea.Cmd) {
+	if m.currentView != viewQueue {
 		return m, nil
 	}
 	// Block filter modal when both repo and branch are locked via CLI flags
@@ -1011,15 +1014,15 @@ func (m tuiModel) handleFilterOpenKey() (tea.Model, tea.Cmd) {
 	m.filterFlatList = nil
 	m.filterSelectedIdx = 0
 	m.filterSearch = ""
-	m.currentView = tuiViewFilter
+	m.currentView = viewFilter
 	if !m.branchBackfillDone {
 		return m, tea.Batch(m.fetchRepos(), m.backfillBranches())
 	}
 	return m, m.fetchRepos()
 }
 
-func (m tuiModel) handleBranchFilterOpenKey() (tea.Model, tea.Cmd) {
-	if m.currentView != tuiViewQueue {
+func (m model) handleBranchFilterOpenKey() (tea.Model, tea.Cmd) {
+	if m.currentView != viewQueue {
 		return m, nil
 	}
 	// Block branch filter when locked via CLI flag
@@ -1030,8 +1033,8 @@ func (m tuiModel) handleBranchFilterOpenKey() (tea.Model, tea.Cmd) {
 	return m.handleFilterOpenKey()
 }
 
-func (m tuiModel) handleHideAddressedKey() (tea.Model, tea.Cmd) {
-	if m.currentView != tuiViewQueue {
+func (m model) handleHideAddressedKey() (tea.Model, tea.Cmd) {
+	if m.currentView != viewQueue {
 		return m, nil
 	}
 	m.hideAddressed = !m.hideAddressed
@@ -1050,8 +1053,8 @@ func (m tuiModel) handleHideAddressedKey() (tea.Model, tea.Cmd) {
 	return m, m.fetchJobs()
 }
 
-func (m tuiModel) handleCommentOpenKey() (tea.Model, tea.Cmd) {
-	if m.currentView == tuiViewQueue && len(m.jobs) > 0 && m.selectedIdx >= 0 && m.selectedIdx < len(m.jobs) {
+func (m model) handleCommentOpenKey() (tea.Model, tea.Cmd) {
+	if m.currentView == viewQueue && len(m.jobs) > 0 && m.selectedIdx >= 0 && m.selectedIdx < len(m.jobs) {
 		job := m.jobs[m.selectedIdx]
 		if job.Status == storage.JobStatusDone || job.Status == storage.JobStatusFailed {
 			if m.commentJobID != job.ID {
@@ -1059,11 +1062,11 @@ func (m tuiModel) handleCommentOpenKey() (tea.Model, tea.Cmd) {
 			}
 			m.commentJobID = job.ID
 			m.commentCommit = git.ShortSHA(job.GitRef)
-			m.commentFromView = tuiViewQueue
-			m.currentView = tuiViewComment
+			m.commentFromView = viewQueue
+			m.currentView = viewKindComment
 		}
 		return m, nil
-	} else if m.currentView == tuiViewReview && m.currentReview != nil {
+	} else if m.currentView == viewReview && m.currentReview != nil {
 		if m.commentJobID != m.currentReview.JobID {
 			m.commentText = ""
 		}
@@ -1073,17 +1076,17 @@ func (m tuiModel) handleCommentOpenKey() (tea.Model, tea.Cmd) {
 			m.commentCommit = git.ShortSHA(
 				m.currentReview.Job.GitRef)
 		}
-		m.commentFromView = tuiViewReview
-		m.currentView = tuiViewComment
+		m.commentFromView = viewReview
+		m.currentView = viewKindComment
 		return m, nil
 	}
 	return m, nil
 }
 
-func (m tuiModel) handleCopyKey() (tea.Model, tea.Cmd) {
-	if m.currentView == tuiViewReview && m.currentReview != nil && m.currentReview.Output != "" {
+func (m model) handleCopyKey() (tea.Model, tea.Cmd) {
+	if m.currentView == viewReview && m.currentReview != nil && m.currentReview.Output != "" {
 		return m, m.copyToClipboard(m.currentReview)
-	} else if m.currentView == tuiViewQueue && len(m.jobs) > 0 && m.selectedIdx >= 0 && m.selectedIdx < len(m.jobs) {
+	} else if m.currentView == viewQueue && len(m.jobs) > 0 && m.selectedIdx >= 0 && m.selectedIdx < len(m.jobs) {
 		job := m.jobs[m.selectedIdx]
 		if job.Status == storage.JobStatusDone || job.Status == storage.JobStatusFailed {
 			return m, m.fetchReviewAndCopy(job.ID, &job)
@@ -1101,21 +1104,21 @@ func (m tuiModel) handleCopyKey() (tea.Model, tea.Cmd) {
 		}
 		m.flashMessage = fmt.Sprintf("Job #%d is %s — no review to copy", job.ID, status)
 		m.flashExpiresAt = time.Now().Add(2 * time.Second)
-		m.flashView = tuiViewQueue
+		m.flashView = viewQueue
 		return m, nil
 	}
 	return m, nil
 }
 
-func (m tuiModel) handleCommitMsgKey() (tea.Model, tea.Cmd) {
-	if m.currentView == tuiViewQueue && len(m.jobs) > 0 && m.selectedIdx >= 0 && m.selectedIdx < len(m.jobs) {
+func (m model) handleCommitMsgKey() (tea.Model, tea.Cmd) {
+	if m.currentView == viewQueue && len(m.jobs) > 0 && m.selectedIdx >= 0 && m.selectedIdx < len(m.jobs) {
 		job := m.jobs[m.selectedIdx]
 		m.commitMsgFromView = m.currentView
 		m.commitMsgJobID = job.ID
 		m.commitMsgContent = ""
 		m.commitMsgScroll = 0
 		return m, m.fetchCommitMsg(&job)
-	} else if m.currentView == tuiViewReview && m.currentReview != nil && m.currentReview.Job != nil {
+	} else if m.currentView == viewReview && m.currentReview != nil && m.currentReview.Job != nil {
 		job := m.currentReview.Job
 		m.commitMsgFromView = m.currentView
 		m.commitMsgJobID = job.ID
@@ -1126,22 +1129,22 @@ func (m tuiModel) handleCommitMsgKey() (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m tuiModel) handleHelpKey() (tea.Model, tea.Cmd) {
-	if m.currentView == tuiViewHelp {
+func (m model) handleHelpKey() (tea.Model, tea.Cmd) {
+	if m.currentView == viewHelp {
 		m.currentView = m.helpFromView
 		return m, nil
 	}
-	if m.currentView == tuiViewQueue || m.currentView == tuiViewReview || m.currentView == tuiViewPrompt || m.currentView == tuiViewLog {
+	if m.currentView == viewQueue || m.currentView == viewReview || m.currentView == viewKindPrompt || m.currentView == viewLog {
 		m.helpFromView = m.currentView
-		m.currentView = tuiViewHelp
+		m.currentView = viewHelp
 		m.helpScroll = 0
 		return m, nil
 	}
 	return m, nil
 }
 
-func (m tuiModel) handleEscKey() (tea.Model, tea.Cmd) {
-	if m.currentView == tuiViewQueue && len(m.filterStack) > 0 {
+func (m model) handleEscKey() (tea.Model, tea.Cmd) {
+	if m.currentView == viewQueue && len(m.filterStack) > 0 {
 		popped := m.popFilter()
 		if popped == filterTypeRepo || popped == filterTypeBranch {
 			m.hasMore = false
@@ -1152,7 +1155,7 @@ func (m tuiModel) handleEscKey() (tea.Model, tea.Cmd) {
 			return m, m.fetchJobs()
 		}
 		return m, nil
-	} else if m.currentView == tuiViewQueue && m.hideAddressed {
+	} else if m.currentView == viewQueue && m.hideAddressed {
 		m.hideAddressed = false
 		m.hasMore = false
 		m.selectedIdx = -1
@@ -1160,7 +1163,7 @@ func (m tuiModel) handleEscKey() (tea.Model, tea.Cmd) {
 		m.fetchSeq++
 		m.loadingJobs = true
 		return m, m.fetchJobs()
-	} else if m.currentView == tuiViewReview {
+	} else if m.currentView == viewReview {
 		// If fix panel is open (unfocused), esc closes it rather than leaving the review
 		if m.reviewFixPanelOpen {
 			m.closeFixPanel()
@@ -1169,41 +1172,41 @@ func (m tuiModel) handleEscKey() (tea.Model, tea.Cmd) {
 		m.closeFixPanel()
 		returnTo := m.reviewFromView
 		if returnTo == 0 {
-			returnTo = tuiViewQueue
+			returnTo = viewQueue
 		}
 		m.currentView = returnTo
 		m.currentReview = nil
 		m.reviewScroll = 0
 		m.paginateNav = 0
-		if returnTo == tuiViewQueue {
+		if returnTo == viewQueue {
 			m.normalizeSelectionIfHidden()
 			if m.hideAddressed && !m.loadingJobs {
 				m.loadingJobs = true
 				return m, m.fetchJobs()
 			}
 		}
-	} else if m.currentView == tuiViewPrompt {
+	} else if m.currentView == viewKindPrompt {
 		m.paginateNav = 0
 		if m.promptFromQueue {
-			m.currentView = tuiViewQueue
+			m.currentView = viewQueue
 			m.currentReview = nil
 			m.promptScroll = 0
 		} else {
-			m.currentView = tuiViewReview
+			m.currentView = viewReview
 			m.promptScroll = 0
 		}
-	} else if m.currentView == tuiViewCommitMsg {
+	} else if m.currentView == viewCommitMsg {
 		m.currentView = m.commitMsgFromView
 		m.commitMsgContent = ""
 		m.commitMsgScroll = 0
-	} else if m.currentView == tuiViewHelp {
+	} else if m.currentView == viewHelp {
 		m.currentView = m.helpFromView
 	}
 	return m, nil
 }
 
 // handleJobsMsg processes job list updates from the server.
-func (m tuiModel) handleJobsMsg(msg tuiJobsMsg) (tea.Model, tea.Cmd) {
+func (m model) handleJobsMsg(msg jobsMsg) (tea.Model, tea.Cmd) {
 	// Discard stale responses from before a filter change.
 	if msg.seq < m.fetchSeq {
 		m.paginateNav = 0
@@ -1272,7 +1275,7 @@ func (m tuiModel) handleJobsMsg(msg tuiJobsMsg) (tea.Model, tea.Cmd) {
 	// Selection management
 	if len(m.jobs) == 0 {
 		m.selectedIdx = -1
-		if m.currentView != tuiViewReview || m.currentReview == nil || m.currentReview.Job == nil {
+		if m.currentView != viewReview || m.currentReview == nil || m.currentReview.Job == nil {
 			m.selectedJobID = 0
 		}
 	} else if m.selectedJobID > 0 {
@@ -1309,7 +1312,7 @@ func (m tuiModel) handleJobsMsg(msg tuiJobsMsg) (tea.Model, tea.Cmd) {
 				m.selectedJobID = 0
 			}
 		}
-	} else if m.currentView == tuiViewReview && m.currentReview != nil && m.currentReview.Job != nil {
+	} else if m.currentView == viewReview && m.currentReview != nil && m.currentReview.Job != nil {
 		targetID := m.currentReview.Job.ID
 		for i, job := range m.jobs {
 			if job.ID == targetID {
@@ -1337,7 +1340,7 @@ func (m tuiModel) handleJobsMsg(msg tuiJobsMsg) (tea.Model, tea.Cmd) {
 	}
 
 	// Auto-paginate when hide-addressed hides too many jobs
-	if m.currentView == tuiViewQueue &&
+	if m.currentView == viewQueue &&
 		m.hideAddressed &&
 		m.canPaginate() &&
 		len(m.getVisibleJobs()) < m.queueVisibleRows() {
@@ -1350,7 +1353,7 @@ func (m tuiModel) handleJobsMsg(msg tuiJobsMsg) (tea.Model, tea.Cmd) {
 		nav := m.paginateNav
 		m.paginateNav = 0
 		switch nav {
-		case tuiViewReview:
+		case viewReview:
 			nextIdx := m.findNextViewableJob()
 			if nextIdx >= 0 {
 				m.selectedIdx = nextIdx
@@ -1369,7 +1372,7 @@ func (m tuiModel) handleJobsMsg(msg tuiJobsMsg) (tea.Model, tea.Cmd) {
 					}
 				}
 			}
-		case tuiViewPrompt:
+		case viewKindPrompt:
 			nextIdx := m.findNextPromptableJob()
 			if nextIdx >= 0 {
 				m.selectedIdx = nextIdx
@@ -1386,7 +1389,7 @@ func (m tuiModel) handleJobsMsg(msg tuiJobsMsg) (tea.Model, tea.Cmd) {
 					}
 				}
 			}
-		case tuiViewLog:
+		case viewLog:
 			nextIdx := m.findNextLoggableJob()
 			if nextIdx >= 0 {
 				m.selectedIdx = nextIdx
@@ -1405,7 +1408,7 @@ func (m tuiModel) handleJobsMsg(msg tuiJobsMsg) (tea.Model, tea.Cmd) {
 }
 
 // handleStatusMsg processes daemon status updates.
-func (m tuiModel) handleStatusMsg(msg tuiStatusMsg) (tea.Model, tea.Cmd) {
+func (m model) handleStatusMsg(msg statusMsg) (tea.Model, tea.Cmd) {
 	m.status = storage.DaemonStatus(msg)
 	m.consecutiveErrors = 0
 	if m.status.Version != "" {
@@ -1423,7 +1426,7 @@ func (m tuiModel) handleStatusMsg(msg tuiStatusMsg) (tea.Model, tea.Cmd) {
 }
 
 // handleAddressedResultMsg processes the result of an addressed toggle API call.
-func (m tuiModel) handleAddressedResultMsg(msg tuiAddressedResultMsg) (tea.Model, tea.Cmd) {
+func (m model) handleAddressedResultMsg(msg addressedResultMsg) (tea.Model, tea.Cmd) {
 	isCurrentRequest := false
 	if msg.jobID > 0 {
 		if pending, ok := m.pendingAddressed[msg.jobID]; ok && pending.seq == msg.seq {
@@ -1461,7 +1464,7 @@ func (m tuiModel) handleAddressedResultMsg(msg tuiAddressedResultMsg) (tea.Model
 }
 
 // handleReconnectMsg processes daemon reconnection attempts.
-func (m tuiModel) handleReconnectMsg(msg tuiReconnectMsg) (tea.Model, tea.Cmd) {
+func (m model) handleReconnectMsg(msg reconnectMsg) (tea.Model, tea.Cmd) {
 	m.reconnecting = false
 	if msg.err == nil && msg.newAddr != "" && msg.newAddr != m.serverAddr {
 		m.serverAddr = msg.newAddr
@@ -1482,14 +1485,14 @@ func (m tuiModel) handleReconnectMsg(msg tuiReconnectMsg) (tea.Model, tea.Cmd) {
 }
 
 // handleFixKey opens the fix prompt modal for the currently selected job.
-func (m tuiModel) handleFixKey() (tea.Model, tea.Cmd) {
-	if m.currentView != tuiViewQueue && m.currentView != tuiViewReview {
+func (m model) handleFixKey() (tea.Model, tea.Cmd) {
+	if m.currentView != viewQueue && m.currentView != viewReview {
 		return m, nil
 	}
 
 	// Get the selected job
 	var job storage.ReviewJob
-	if m.currentView == tuiViewReview {
+	if m.currentView == viewReview {
 		if m.currentReview == nil || m.currentReview.Job == nil {
 			return m, nil
 		}
@@ -1516,7 +1519,7 @@ func (m tuiModel) handleFixKey() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	if m.currentView == tuiViewReview {
+	if m.currentView == viewReview {
 		// Open inline fix panel within review view
 		m.fixPromptJobID = job.ID
 		m.fixPromptText = ""
@@ -1529,13 +1532,13 @@ func (m tuiModel) handleFixKey() (tea.Model, tea.Cmd) {
 	m.fixPromptJobID = job.ID
 	m.fixPromptText = ""
 	m.reviewFixPanelPending = true
-	m.reviewFromView = tuiViewQueue
+	m.reviewFromView = viewQueue
 	m.selectedJobID = job.ID
 	return m, m.fetchReview(job.ID)
 }
 
 // handleReviewFixPanelKey handles key input when the inline fix panel is focused.
-func (m tuiModel) handleReviewFixPanelKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m model) handleReviewFixPanelKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "ctrl+c":
 		return m, tea.Quit
@@ -1555,7 +1558,7 @@ func (m tuiModel) handleReviewFixPanelKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.reviewFixPanelFocused = false
 		m.fixPromptText = ""
 		m.fixPromptJobID = 0
-		m.currentView = tuiViewTasks
+		m.currentView = viewTasks
 		return m, m.triggerFix(jobID, prompt, "")
 	case "backspace":
 		if len(m.fixPromptText) > 0 {
@@ -1576,39 +1579,39 @@ func (m tuiModel) handleReviewFixPanelKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 // handleTabKey shifts focus to the fix panel when it is open in review view.
-func (m tuiModel) handleTabKey() (tea.Model, tea.Cmd) {
-	if m.currentView == tuiViewReview && m.reviewFixPanelOpen && !m.reviewFixPanelFocused {
+func (m model) handleTabKey() (tea.Model, tea.Cmd) {
+	if m.currentView == viewReview && m.reviewFixPanelOpen && !m.reviewFixPanelFocused {
 		m.reviewFixPanelFocused = true
 	}
 	return m, nil
 }
 
 // handleToggleTasksKey switches between queue and tasks view.
-func (m tuiModel) handleToggleTasksKey() (tea.Model, tea.Cmd) {
-	if m.currentView == tuiViewTasks {
-		m.currentView = tuiViewQueue
+func (m model) handleToggleTasksKey() (tea.Model, tea.Cmd) {
+	if m.currentView == viewTasks {
+		m.currentView = viewQueue
 		return m, nil
 	}
-	if m.currentView == tuiViewQueue {
-		m.currentView = tuiViewTasks
+	if m.currentView == viewQueue {
+		m.currentView = viewTasks
 		return m, m.fetchFixJobs()
 	}
 	return m, nil
 }
 
 // handleWorktreeConfirmKey handles key input in the worktree creation confirmation modal.
-func (m tuiModel) handleWorktreeConfirmKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m model) handleWorktreeConfirmKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "ctrl+c":
 		return m, tea.Quit
 	case "esc", "n":
-		m.currentView = tuiViewTasks
+		m.currentView = viewTasks
 		m.worktreeConfirmJobID = 0
 		m.worktreeConfirmBranch = ""
 		return m, nil
 	case "enter", "y":
 		jobID := m.worktreeConfirmJobID
-		m.currentView = tuiViewTasks
+		m.currentView = viewTasks
 		m.worktreeConfirmJobID = 0
 		m.worktreeConfirmBranch = ""
 		return m, m.applyFixPatchInWorktree(jobID)
@@ -1617,12 +1620,12 @@ func (m tuiModel) handleWorktreeConfirmKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) 
 }
 
 // handleTasksKey handles key input in the tasks view.
-func (m tuiModel) handleTasksKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m model) handleTasksKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "ctrl+c", "q":
 		return m, tea.Quit
 	case "esc", "T":
-		m.currentView = tuiViewQueue
+		m.currentView = viewQueue
 		return m, nil
 	case "up", "k":
 		if m.fixSelectedIdx > 0 {
@@ -1646,20 +1649,20 @@ func (m tuiModel) handleTasksKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 						Prompt: job.Prompt,
 						Job:    &job,
 					}
-					m.reviewFromView = tuiViewTasks
-					m.currentView = tuiViewPrompt
+					m.reviewFromView = viewTasks
+					m.currentView = viewKindPrompt
 					m.promptScroll = 0
 					m.promptFromQueue = false
 					return m, nil
 				}
 				// No prompt yet, go straight to log view
-				return m.openLogView(job.ID, job.Status, tuiViewTasks)
+				return m.openLogView(job.ID, job.Status, viewTasks)
 			case job.HasViewableOutput():
 				m.selectedJobID = job.ID
-				m.reviewFromView = tuiViewTasks
+				m.reviewFromView = viewTasks
 				return m, m.fetchReview(job.ID)
 			case job.Status == storage.JobStatusFailed:
-				return m.openLogView(job.ID, job.Status, tuiViewTasks)
+				return m.openLogView(job.ID, job.Status, viewTasks)
 			}
 		}
 		return m, nil
@@ -1670,10 +1673,10 @@ func (m tuiModel) handleTasksKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if job.Status == storage.JobStatusQueued {
 				m.flashMessage = "Job is queued - not yet running"
 				m.flashExpiresAt = time.Now().Add(2 * time.Second)
-				m.flashView = tuiViewTasks
+				m.flashView = viewTasks
 				return m, nil
 			}
-			return m.openLogView(job.ID, job.Status, tuiViewTasks)
+			return m.openLogView(job.ID, job.Status, viewTasks)
 		}
 		return m, nil
 	case "A":
@@ -1731,12 +1734,12 @@ func (m tuiModel) handleTasksKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 // handlePatchKey handles key input in the patch viewer.
-func (m tuiModel) handlePatchKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m model) handlePatchKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "ctrl+c":
 		return m, tea.Quit
 	case "esc", "q":
-		m.currentView = tuiViewTasks
+		m.currentView = viewTasks
 		m.patchText = ""
 		m.patchScroll = 0
 		m.patchJobID = 0
@@ -1771,7 +1774,7 @@ func (m tuiModel) handlePatchKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 // closeFixPanel resets all inline fix panel state. Call this when
 // leaving review view or navigating to a different review.
-func (m *tuiModel) closeFixPanel() {
+func (m *model) closeFixPanel() {
 	m.reviewFixPanelOpen = false
 	m.reviewFixPanelFocused = false
 	m.reviewFixPanelPending = false
@@ -1780,7 +1783,7 @@ func (m *tuiModel) closeFixPanel() {
 }
 
 // handleConnectionError tracks consecutive connection errors and triggers reconnection.
-func (m *tuiModel) handleConnectionError(err error) tea.Cmd {
+func (m *model) handleConnectionError(err error) tea.Cmd {
 	if isConnectionError(err) {
 		m.consecutiveErrors++
 		if m.consecutiveErrors >= 3 && !m.reconnecting {
@@ -1789,4 +1792,611 @@ func (m *tuiModel) handleConnectionError(err error) tea.Cmd {
 		}
 	}
 	return nil
+}
+
+// handleWindowSizeMsg processes terminal resize events.
+func (m model) handleWindowSizeMsg(
+	msg tea.WindowSizeMsg,
+) (tea.Model, tea.Cmd) {
+	m.width = msg.Width
+	m.height = msg.Height
+	m.heightDetected = true
+
+	// If terminal can show more jobs than we have, re-fetch to fill
+	if !m.loadingMore && !m.loadingJobs &&
+		len(m.jobs) > 0 && m.hasMore &&
+		len(m.activeRepoFilter) <= 1 {
+		newVisibleRows := m.queueVisibleRows() + queuePrefetchBuffer
+		if newVisibleRows > len(m.jobs) {
+			m.loadingJobs = true
+			return m, m.fetchJobs()
+		}
+	}
+
+	// Width change in log view requires full re-render
+	if m.currentView == viewLog && m.logLines != nil {
+		m.logOffset = 0
+		m.logLines = nil
+		m.logFmtr = streamfmt.NewWithWidth(
+			io.Discard, msg.Width, m.glamourStyle,
+		)
+		m.logFetchSeq++
+		m.logLoading = true
+		return m, m.fetchJobLog(m.logJobID)
+	}
+
+	return m, nil
+}
+
+// handleTickMsg processes periodic tick events for adaptive polling.
+func (m model) handleTickMsg(
+	_ tickMsg,
+) (tea.Model, tea.Cmd) {
+	// Skip job refresh while pagination or another refresh is in flight
+	if m.loadingMore || m.loadingJobs {
+		return m, tea.Batch(m.tick(), m.fetchStatus())
+	}
+	cmds := []tea.Cmd{m.tick(), m.fetchJobs(), m.fetchStatus()}
+	if m.currentView == viewTasks || m.hasActiveFixJobs() {
+		cmds = append(cmds, m.fetchFixJobs())
+	}
+	return m, tea.Batch(cmds...)
+}
+
+// handleLogTickMsg processes log stream polling ticks.
+func (m model) handleLogTickMsg(
+	_ logTickMsg,
+) (tea.Model, tea.Cmd) {
+	if m.currentView == viewLog && m.logStreaming &&
+		m.logJobID > 0 && !m.logLoading {
+		m.logLoading = true
+		return m, m.fetchJobLog(m.logJobID)
+	}
+	return m, nil
+}
+
+// handleUpdateCheckMsg processes version update check results.
+func (m model) handleUpdateCheckMsg(
+	msg updateCheckMsg,
+) (tea.Model, tea.Cmd) {
+	m.updateAvailable = msg.version
+	m.updateIsDevBuild = msg.isDevBuild
+	return m, nil
+}
+
+// handleReviewMsg processes review fetch results.
+func (m model) handleReviewMsg(
+	msg reviewMsg,
+) (tea.Model, tea.Cmd) {
+	if msg.jobID != m.selectedJobID {
+		// Stale fetch -- clear pending fix panel if it was
+		// for this (now-discarded) review.
+		if m.reviewFixPanelPending &&
+			m.fixPromptJobID == msg.jobID {
+			m.reviewFixPanelPending = false
+			m.fixPromptJobID = 0
+		}
+		return m, nil
+	}
+	m.consecutiveErrors = 0
+	m.currentReview = msg.review
+	m.currentResponses = msg.responses
+	m.currentBranch = msg.branchName
+	m.currentView = viewReview
+	m.reviewScroll = 0
+	if m.reviewFixPanelPending &&
+		m.fixPromptJobID == msg.review.JobID {
+		m.reviewFixPanelPending = false
+		m.reviewFixPanelOpen = true
+		m.reviewFixPanelFocused = true
+	}
+	return m, nil
+}
+
+// handlePromptMsg processes prompt fetch results.
+func (m model) handlePromptMsg(
+	msg promptMsg,
+) (tea.Model, tea.Cmd) {
+	if msg.jobID != m.selectedJobID {
+		return m, nil
+	}
+	m.consecutiveErrors = 0
+	m.currentReview = msg.review
+	m.currentView = viewKindPrompt
+	m.promptScroll = 0
+	return m, nil
+}
+
+// handleLogOutputMsg processes log output from the daemon.
+func (m model) handleLogOutputMsg(
+	msg logOutputMsg,
+) (tea.Model, tea.Cmd) {
+	// Drop stale responses from previous log sessions.
+	if msg.seq != m.logFetchSeq {
+		return m, nil
+	}
+	m.logLoading = false
+	m.consecutiveErrors = 0
+	// If the user navigated away while a fetch was in-flight, drop it.
+	if m.currentView != viewLog {
+		return m, nil
+	}
+	if msg.err != nil {
+		if errors.Is(msg.err, errNoLog) {
+			flash := "No log available for this job"
+			if job := m.logViewLookupJob(); job != nil &&
+				job.Status == storage.JobStatusFailed &&
+				job.Error != "" {
+				flash = fmt.Sprintf(
+					"Job #%d failed: %s",
+					m.logJobID, job.Error,
+				)
+			}
+			m.flashMessage = flash
+			m.flashExpiresAt = time.Now().Add(5 * time.Second)
+			m.flashView = m.logFromView
+			m.currentView = m.logFromView
+			m.logStreaming = false
+			return m, nil
+		}
+		m.err = msg.err
+		return m, nil
+	}
+	if m.currentView == viewLog {
+		// Persist formatter state for incremental polls
+		if msg.fmtr != nil {
+			m.logFmtr = msg.fmtr
+		}
+
+		if msg.append {
+			if len(msg.lines) > 0 {
+				m.logLines = append(
+					m.logLines, msg.lines...,
+				)
+			}
+		} else if len(msg.lines) > 0 {
+			m.logLines = msg.lines
+		} else if m.logLines == nil {
+			if !msg.hasMore {
+				m.logLines = []logLine{}
+			}
+		} else if msg.newOffset == 0 {
+			m.logLines = []logLine{}
+		}
+		m.logOffset = msg.newOffset
+		m.logStreaming = msg.hasMore
+		if m.logFollow && len(m.logLines) > 0 {
+			visibleLines := m.logVisibleLines()
+			maxScroll := max(len(m.logLines)-visibleLines, 0)
+			m.logScroll = maxScroll
+		}
+		if m.logStreaming {
+			return m, tea.Tick(
+				500*time.Millisecond,
+				func(t time.Time) tea.Msg {
+					return logTickMsg{}
+				},
+			)
+		}
+	}
+	return m, nil
+}
+
+// handleAddressedToggleMsg processes addressed state toggle messages.
+func (m model) handleAddressedToggleMsg(
+	msg addressedMsg,
+) (tea.Model, tea.Cmd) {
+	if m.currentReview != nil {
+		m.currentReview.Addressed = bool(msg)
+	}
+	return m, nil
+}
+
+// handleCancelResultMsg processes job cancellation results.
+func (m model) handleCancelResultMsg(
+	msg cancelResultMsg,
+) (tea.Model, tea.Cmd) {
+	if msg.err != nil {
+		m.setJobStatus(msg.jobID, msg.oldState)
+		m.setJobFinishedAt(msg.jobID, msg.oldFinishedAt)
+		m.err = msg.err
+	}
+	return m, nil
+}
+
+// handleRerunResultMsg processes job re-run results.
+func (m model) handleRerunResultMsg(
+	msg rerunResultMsg,
+) (tea.Model, tea.Cmd) {
+	if msg.err != nil {
+		m.setJobStatus(msg.jobID, msg.oldState)
+		m.setJobStartedAt(msg.jobID, msg.oldStartedAt)
+		m.setJobFinishedAt(msg.jobID, msg.oldFinishedAt)
+		m.setJobError(msg.jobID, msg.oldError)
+		m.err = msg.err
+	}
+	return m, nil
+}
+
+// handleReposMsg processes repo list results for the filter modal.
+func (m model) handleReposMsg(
+	msg reposMsg,
+) (tea.Model, tea.Cmd) {
+	m.consecutiveErrors = 0
+	// Build filterTree from repos (all collapsed, no children)
+	m.filterTree = make([]treeFilterNode, len(msg.repos))
+	for i, r := range msg.repos {
+		m.filterTree[i] = treeFilterNode{
+			name:      r.name,
+			rootPaths: r.rootPaths,
+			count:     r.count,
+		}
+	}
+	// Move cwd repo to first position for quick access
+	if m.cwdRepoRoot != "" && len(m.filterTree) > 1 {
+		moveToFront(m.filterTree, func(n treeFilterNode) bool {
+			return slices.Contains(n.rootPaths, m.cwdRepoRoot)
+		})
+	}
+	m.rebuildFilterFlatList()
+	// Pre-select active filter if any
+	if len(m.activeRepoFilter) > 0 {
+		for i, entry := range m.filterFlatList {
+			if entry.repoIdx >= 0 && entry.branchIdx == -1 &&
+				rootPathsMatch(
+					m.filterTree[entry.repoIdx].rootPaths,
+					m.activeRepoFilter,
+				) {
+				m.filterSelectedIdx = i
+				break
+			}
+		}
+	}
+	// Auto-expand repo to branches when opened via 'b' key
+	if m.filterBranchMode && len(m.filterTree) > 0 {
+		targetIdx := 0
+		if len(m.activeRepoFilter) > 0 {
+			for i, node := range m.filterTree {
+				if rootPathsMatch(
+					node.rootPaths, m.activeRepoFilter,
+				) {
+					targetIdx = i
+					goto foundTarget
+				}
+			}
+		}
+		if m.cwdRepoRoot != "" {
+			for i, node := range m.filterTree {
+				for _, p := range node.rootPaths {
+					if p == m.cwdRepoRoot {
+						targetIdx = i
+						goto foundTarget
+					}
+				}
+			}
+		}
+	foundTarget:
+		m.filterTree[targetIdx].loading = true
+		for i, entry := range m.filterFlatList {
+			if entry.repoIdx == targetIdx &&
+				entry.branchIdx == -1 {
+				m.filterSelectedIdx = i
+				break
+			}
+		}
+		return m, m.fetchBranchesForRepo(
+			m.filterTree[targetIdx].rootPaths,
+			targetIdx, true, m.filterSearchSeq,
+		)
+	}
+	// If user typed search before repos loaded, kick off fetches
+	if cmd := m.fetchUnloadedBranches(); cmd != nil {
+		return m, cmd
+	}
+	return m, nil
+}
+
+// handleRepoBranchesMsg processes branch list results for a repo.
+func (m model) handleRepoBranchesMsg(
+	msg repoBranchesMsg,
+) (tea.Model, tea.Cmd) {
+	if msg.err != nil {
+		m.err = msg.err
+		m.filterBranchMode = false
+		if msg.repoIdx >= 0 &&
+			msg.repoIdx < len(m.filterTree) &&
+			rootPathsMatch(
+				m.filterTree[msg.repoIdx].rootPaths,
+				msg.rootPaths,
+			) {
+			m.filterTree[msg.repoIdx].loading = false
+			if !msg.expandOnLoad && m.filterSearch != "" &&
+				msg.searchSeq == m.filterSearchSeq {
+				m.filterTree[msg.repoIdx].fetchFailed = true
+			}
+		}
+		if cmd := m.handleConnectionError(msg.err); cmd != nil {
+			return m, cmd
+		}
+		return m, m.fetchUnloadedBranches()
+	}
+	// Verify filter view, repoIdx valid, and identity matches
+	if m.currentView == viewFilter &&
+		msg.repoIdx >= 0 &&
+		msg.repoIdx < len(m.filterTree) &&
+		rootPathsMatch(
+			m.filterTree[msg.repoIdx].rootPaths,
+			msg.rootPaths,
+		) {
+		m.consecutiveErrors = 0
+		m.filterTree[msg.repoIdx].loading = false
+		m.filterTree[msg.repoIdx].children = msg.branches
+		if msg.expandOnLoad {
+			m.filterTree[msg.repoIdx].expanded = true
+		}
+		// Move cwd branch to first position if this is cwd repo
+		if m.cwdBranch != "" && len(msg.branches) > 1 {
+			isCwdRepo := slices.Contains(
+				m.filterTree[msg.repoIdx].rootPaths,
+				m.cwdRepoRoot,
+			)
+			if isCwdRepo {
+				moveToFront(
+					m.filterTree[msg.repoIdx].children,
+					func(b branchFilterItem) bool {
+						return b.name == m.cwdBranch
+					},
+				)
+			}
+		}
+		m.rebuildFilterFlatList()
+		// Auto-position on first branch when opened via 'b'
+		if m.filterBranchMode {
+			m.filterBranchMode = false
+			for i, entry := range m.filterFlatList {
+				if entry.repoIdx == msg.repoIdx &&
+					entry.branchIdx >= 0 {
+					m.filterSelectedIdx = i
+					break
+				}
+			}
+		}
+		if cmd := m.fetchUnloadedBranches(); cmd != nil {
+			return m, cmd
+		}
+	}
+	return m, nil
+}
+
+// handleBranchesMsg processes branch backfill completion.
+func (m model) handleBranchesMsg(
+	msg branchesMsg,
+) (tea.Model, tea.Cmd) {
+	m.consecutiveErrors = 0
+	m.branchBackfillDone = true
+	if msg.backfillCount > 0 {
+		m.flashMessage = fmt.Sprintf(
+			"Backfilled branch info for %d jobs",
+			msg.backfillCount,
+		)
+		m.flashExpiresAt = time.Now().Add(5 * time.Second)
+		m.flashView = viewFilter
+	}
+	return m, nil
+}
+
+// handleCommentResultMsg processes comment submission results.
+func (m model) handleCommentResultMsg(
+	msg commentResultMsg,
+) (tea.Model, tea.Cmd) {
+	if msg.err != nil {
+		m.err = msg.err
+	} else {
+		if m.commentJobID == msg.jobID {
+			m.commentText = ""
+			m.commentJobID = 0
+		}
+		if m.currentView == viewReview &&
+			m.currentReview != nil &&
+			m.currentReview.JobID == msg.jobID {
+			return m, m.fetchReview(msg.jobID)
+		}
+	}
+	return m, nil
+}
+
+// handleClipboardResultMsg processes clipboard copy results.
+func (m model) handleClipboardResultMsg(
+	msg clipboardResultMsg,
+) (tea.Model, tea.Cmd) {
+	if msg.err != nil {
+		m.err = fmt.Errorf("copy failed: %w", msg.err)
+	} else {
+		m.flashMessage = "Copied to clipboard"
+		m.flashExpiresAt = time.Now().Add(2 * time.Second)
+		m.flashView = msg.view
+	}
+	return m, nil
+}
+
+// handleCommitMsgMsg processes commit message fetch results.
+func (m model) handleCommitMsgMsg(
+	msg commitMsgMsg,
+) (tea.Model, tea.Cmd) {
+	if msg.jobID != m.commitMsgJobID {
+		return m, nil
+	}
+	if msg.err != nil {
+		m.flashMessage = msg.err.Error()
+		m.flashExpiresAt = time.Now().Add(2 * time.Second)
+		m.flashView = m.currentView
+		return m, nil
+	}
+	m.commitMsgContent = msg.content
+	m.commitMsgScroll = 0
+	m.currentView = viewCommitMsg
+	return m, nil
+}
+
+// handleJobsErrMsg processes job fetch errors.
+func (m model) handleJobsErrMsg(
+	msg jobsErrMsg,
+) (tea.Model, tea.Cmd) {
+	if msg.seq < m.fetchSeq {
+		return m, nil
+	}
+	m.err = msg.err
+	m.loadingJobs = false
+	if cmd := m.handleConnectionError(msg.err); cmd != nil {
+		return m, cmd
+	}
+	return m, nil
+}
+
+// handlePaginationErrMsg processes pagination fetch errors.
+func (m model) handlePaginationErrMsg(
+	msg paginationErrMsg,
+) (tea.Model, tea.Cmd) {
+	if msg.seq < m.fetchSeq {
+		m.loadingMore = false
+		m.paginateNav = 0
+		return m, nil
+	}
+	m.err = msg.err
+	m.loadingMore = false
+	m.paginateNav = 0
+	if cmd := m.handleConnectionError(msg.err); cmd != nil {
+		return m, cmd
+	}
+	return m, nil
+}
+
+// handleErrMsg processes generic error messages.
+func (m model) handleErrMsg(
+	msg errMsg,
+) (tea.Model, tea.Cmd) {
+	m.err = msg
+	if cmd := m.handleConnectionError(msg); cmd != nil {
+		return m, cmd
+	}
+	return m, nil
+}
+
+// handleFixJobsMsg processes fix job list results.
+func (m model) handleFixJobsMsg(
+	msg fixJobsMsg,
+) (tea.Model, tea.Cmd) {
+	if msg.err != nil {
+		m.err = msg.err
+	} else {
+		m.fixJobs = msg.jobs
+		if m.fixSelectedIdx >= len(m.fixJobs) &&
+			len(m.fixJobs) > 0 {
+			m.fixSelectedIdx = len(m.fixJobs) - 1
+		}
+	}
+	return m, nil
+}
+
+// handleFixTriggerResultMsg processes fix job trigger results.
+func (m model) handleFixTriggerResultMsg(
+	msg fixTriggerResultMsg,
+) (tea.Model, tea.Cmd) {
+	if msg.err != nil {
+		m.err = msg.err
+		m.flashMessage = fmt.Sprintf(
+			"Fix failed: %v", msg.err,
+		)
+		m.flashExpiresAt = time.Now().Add(3 * time.Second)
+		m.flashView = viewTasks
+	} else if msg.warning != "" {
+		m.flashMessage = msg.warning
+		m.flashExpiresAt = time.Now().Add(5 * time.Second)
+		m.flashView = viewTasks
+		return m, m.fetchFixJobs()
+	} else {
+		m.flashMessage = fmt.Sprintf(
+			"Fix job #%d enqueued", msg.job.ID,
+		)
+		m.flashExpiresAt = time.Now().Add(3 * time.Second)
+		m.flashView = viewTasks
+		return m, m.fetchFixJobs()
+	}
+	return m, nil
+}
+
+// handlePatchResultMsg processes patch fetch results.
+func (m model) handlePatchResultMsg(
+	msg patchMsg,
+) (tea.Model, tea.Cmd) {
+	if msg.err != nil {
+		m.flashMessage = fmt.Sprintf(
+			"Patch fetch failed: %v", msg.err,
+		)
+		m.flashExpiresAt = time.Now().Add(3 * time.Second)
+		m.flashView = viewTasks
+	} else {
+		m.patchText = msg.patch
+		m.patchJobID = msg.jobID
+		m.patchScroll = 0
+		m.currentView = viewPatch
+	}
+	return m, nil
+}
+
+// handleApplyPatchResultMsg processes patch application results.
+func (m model) handleApplyPatchResultMsg(
+	msg applyPatchResultMsg,
+) (tea.Model, tea.Cmd) {
+	if msg.needWorktree {
+		m.worktreeConfirmJobID = msg.jobID
+		m.worktreeConfirmBranch = msg.branch
+		m.currentView = viewKindWorktreeConfirm
+		return m, nil
+	}
+	if msg.rebase {
+		m.flashMessage = fmt.Sprintf(
+			"Patch for job #%d doesn't apply cleanly"+
+				" - triggering rebase", msg.jobID,
+		)
+		m.flashExpiresAt = time.Now().Add(5 * time.Second)
+		m.flashView = viewTasks
+		return m, tea.Batch(
+			m.triggerRebase(msg.jobID), m.fetchFixJobs(),
+		)
+	} else if msg.commitFailed {
+		detail := fmt.Sprintf(
+			"Job #%d: %v", msg.jobID, msg.err,
+		)
+		if msg.worktreeDir != "" {
+			detail += fmt.Sprintf(
+				" (worktree kept at %s)", msg.worktreeDir,
+			)
+		}
+		m.flashMessage = detail
+		m.flashExpiresAt = time.Now().Add(8 * time.Second)
+		m.flashView = viewTasks
+	} else if msg.err != nil {
+		m.flashMessage = fmt.Sprintf(
+			"Apply failed: %v", msg.err,
+		)
+		m.flashExpiresAt = time.Now().Add(3 * time.Second)
+		m.flashView = viewTasks
+	} else {
+		m.flashMessage = fmt.Sprintf(
+			"Patch from job #%d applied and committed",
+			msg.jobID,
+		)
+		m.flashExpiresAt = time.Now().Add(3 * time.Second)
+		m.flashView = viewTasks
+		cmds := []tea.Cmd{m.fetchFixJobs()}
+		if msg.parentJobID > 0 {
+			cmds = append(
+				cmds,
+				m.markParentAddressed(msg.parentJobID),
+			)
+		}
+		return m, tea.Batch(cmds...)
+	}
+	return m, nil
 }
