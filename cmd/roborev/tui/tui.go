@@ -2,6 +2,7 @@ package tui
 
 import (
 	"errors"
+	"log"
 	"net"
 	"net/http"
 	neturl "net/url"
@@ -608,10 +609,14 @@ func (m *model) getBranchForJob(job storage.ReviewJob) string {
 	return branch
 }
 
-// isTextView reports whether v is a text-reading view where
-// mouse capture should be disabled to allow native text selection.
-func isTextView(v viewKind) bool {
-	return v == viewReview || v == viewKindPrompt
+// mouseDisabledView returns true for views where mouse capture should be
+// released to allow native terminal text selection (copy/paste).
+func mouseDisabledView(v viewKind) bool {
+	switch v {
+	case viewLog, viewReview, viewKindPrompt, viewPatch, viewCommitMsg:
+		return true
+	}
+	return false
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -687,18 +692,28 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		)
 		result = m
 	default:
-		result = m
+		// Unknown message types cannot change the view, so no mouse
+		// toggle is needed. If a new message type is added that can
+		// change currentView, add a case above.
+		return m, nil
 	}
 
-	// Toggle mouse capture on view transitions: disable in
-	// text-reading views so the terminal handles selection,
-	// re-enable when returning to interactive views.
-	newM := result.(model)
-	if newM.currentView != prevView {
-		switch {
-		case isTextView(newM.currentView) && !isTextView(prevView):
+	// Track view transitions to toggle mouse capture. Content views
+	// (review, log, patch, etc.) release mouse so the terminal allows
+	// native text selection; interactive views re-enable it for
+	// click and wheel support.
+	updated, ok := result.(model)
+	if !ok {
+		log.Printf("tui: Update returned unexpected type %T; skipping mouse toggle", result)
+		return result, cmd
+	}
+	newView := updated.currentView
+	if newView != prevView {
+		wasDisabled := mouseDisabledView(prevView)
+		nowDisabled := mouseDisabledView(newView)
+		if nowDisabled && !wasDisabled {
 			cmd = tea.Batch(cmd, tea.DisableMouse)
-		case !isTextView(newM.currentView) && isTextView(prevView):
+		} else if !nowDisabled && wasDisabled {
 			cmd = tea.Batch(cmd, tea.EnableMouseCellMotion)
 		}
 	}

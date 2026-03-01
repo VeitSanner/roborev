@@ -10,6 +10,39 @@ import (
 	"github.com/roborev-dev/roborev/internal/streamfmt"
 )
 
+// collectMsgs recursively extracts all tea.Msg values from a Cmd,
+// expanding BatchMsg into individual messages. Note: this executes
+// each Cmd function, so only use with side-effect-free commands
+// (e.g., mouse toggles, clear screen) or in tests with
+// withExternalIODisabled().
+func collectMsgs(cmd tea.Cmd) []tea.Msg {
+	if cmd == nil {
+		return nil
+	}
+	msg := cmd()
+	if msg == nil {
+		return nil
+	}
+	if batch, ok := msg.(tea.BatchMsg); ok {
+		var all []tea.Msg
+		for _, c := range batch {
+			all = append(all, collectMsgs(c)...)
+		}
+		return all
+	}
+	return []tea.Msg{msg}
+}
+
+// hasMsgType returns true if any message in the slice has the given type name.
+func hasMsgType(msgs []tea.Msg, typeName string) bool {
+	for _, msg := range msgs {
+		if fmt.Sprintf("%T", msg) == typeName {
+			return true
+		}
+	}
+	return false
+}
+
 func TestTUILogVisibleLinesWithCommandHeader(t *testing.T) {
 	// logVisibleLines() should account for the command-line header
 	// when the job has a known agent with a command line.
@@ -596,5 +629,183 @@ func TestTUILogOutputTable(t *testing.T) {
 				t.Errorf("Expected logFmtr to match pointer %p, got %p", tt.wantFmtr, m2.logFmtr)
 			}
 		})
+	}
+}
+
+func TestMouseDisabledInContentViews(t *testing.T) {
+	// Transitioning from an interactive view (queue) to a content view
+	// (log, review, patch, prompt, commitMsg) should emit DisableMouse.
+	// Transitioning back should emit EnableMouseCellMotion.
+	contentViews := []struct {
+		name     string
+		view     viewKind
+		exitTo   viewKind       // expected view after exit (0 = viewQueue)
+		enterKey rune           // key to enter the view from queue (0 = use special key)
+		exitKey  rune           // key to exit back (0 = use esc)
+		setup    func(m *model) // additional setup needed
+	}{
+		{
+			name:     "log view",
+			view:     viewLog,
+			enterKey: 'l',
+			setup: func(m *model) {
+				m.jobs = []storage.ReviewJob{
+					makeJob(1, withStatus(storage.JobStatusRunning)),
+				}
+				m.selectedIdx = 0
+			},
+		},
+		{
+			name:     "review view via enter",
+			view:     viewReview,
+			enterKey: 0, // uses enter key
+			setup: func(m *model) {
+				m.jobs = []storage.ReviewJob{
+					makeJob(1, withStatus(storage.JobStatusDone)),
+				}
+				m.selectedIdx = 0
+				// Pre-populate review to avoid HTTP fetch
+				m.currentReview = &storage.Review{
+					ID:     1,
+					JobID:  1,
+					Output: "test review",
+					Job:    &m.jobs[0],
+				}
+			},
+		},
+		{
+			name:   "patch view",
+			view:   viewPatch,
+			exitTo: viewTasks,
+			setup: func(m *model) {
+				m.patchText = "diff --git a/f.go b/f.go"
+				m.patchJobID = 1
+			},
+		},
+		{
+			name: "commit message view",
+			view: viewCommitMsg,
+			setup: func(m *model) {
+				m.commitMsgContent = "feat: test"
+				m.commitMsgJobID = 1
+				m.commitMsgFromView = viewQueue
+			},
+		},
+	}
+
+	for _, tc := range contentViews {
+		// Enter subtest: only run for views that can be entered
+		// synchronously via keypress. Review, patch, and commitMsg
+		// require async HTTP fetches that complete later.
+		if tc.enterKey != 0 {
+			t.Run(tc.name+" enter disables mouse", func(t *testing.T) {
+				m := newModel("http://localhost", withExternalIODisabled())
+				m.currentView = viewQueue
+				m.height = 30
+				m.width = 80
+				if tc.setup != nil {
+					tc.setup(&m)
+				}
+
+				var updated model
+				var cmd tea.Cmd
+				if tc.enterKey != 0 {
+					updated, cmd = pressKey(m, tc.enterKey)
+				} else {
+					updated, cmd = pressSpecial(m, tea.KeyEnter)
+				}
+
+				if updated.currentView == viewQueue {
+					t.Fatalf("view did not change from queue (setup may be incomplete)")
+				}
+
+				msgs := collectMsgs(cmd)
+				if !hasMsgType(msgs, "tea.disableMouseMsg") {
+					types := make([]string, len(msgs))
+					for i, msg := range msgs {
+						types[i] = fmt.Sprintf("%T", msg)
+					}
+					t.Errorf("expected disableMouseMsg in cmd, got types: %v", types)
+				}
+			})
+		}
+
+		t.Run(tc.name+" exit enables mouse", func(t *testing.T) {
+			m := newModel("http://localhost", withExternalIODisabled())
+			m.currentView = tc.view
+			m.height = 30
+			m.width = 80
+			if tc.setup != nil {
+				tc.setup(&m)
+			}
+			// Set up state needed for specific views
+			if tc.view == viewLog {
+				m.logJobID = 1
+				m.logFromView = viewQueue
+			}
+			if tc.view == viewReview {
+				m.reviewFromView = viewQueue
+			}
+
+			var updated model
+			var cmd tea.Cmd
+			if tc.exitKey != 0 {
+				updated, cmd = pressKey(m, tc.exitKey)
+			} else {
+				updated, cmd = pressSpecial(m, tea.KeyEscape)
+			}
+
+			expectedView := tc.exitTo
+			if expectedView == 0 {
+				expectedView = viewQueue
+			}
+			if updated.currentView != expectedView {
+				t.Fatalf("expected view %d after exit, got %d", expectedView, updated.currentView)
+			}
+
+			msgs := collectMsgs(cmd)
+			if !hasMsgType(msgs, "tea.enableMouseCellMotionMsg") {
+				types := make([]string, len(msgs))
+				for i, msg := range msgs {
+					types[i] = fmt.Sprintf("%T", msg)
+				}
+				t.Errorf("expected enableMouseCellMotionMsg in cmd, got types: %v", types)
+			}
+		})
+	}
+}
+
+func TestMouseNotToggledWithinContentViews(t *testing.T) {
+	// Transitioning between content views (e.g., review -> prompt)
+	// should not emit mouse toggle commands since both views have
+	// mouse disabled.
+	m := newModel("http://localhost", withExternalIODisabled())
+	m.currentView = viewReview
+	m.height = 30
+	m.width = 80
+	m.jobs = []storage.ReviewJob{
+		makeJob(1, withStatus(storage.JobStatusDone)),
+	}
+	m.selectedIdx = 0
+	m.currentReview = &storage.Review{
+		ID:     1,
+		JobID:  1,
+		Output: "test",
+		Prompt: "test prompt",
+		Job:    &m.jobs[0],
+	}
+	m.reviewFromView = viewQueue
+
+	// Press 'p' to go from review -> prompt
+	updated, cmd := pressKey(m, 'p')
+	if updated.currentView != viewKindPrompt {
+		t.Skipf("did not switch to prompt view, got %d", updated.currentView)
+	}
+
+	msgs := collectMsgs(cmd)
+	hasDisable := hasMsgType(msgs, "tea.disableMouseMsg")
+	hasEnable := hasMsgType(msgs, "tea.enableMouseCellMotionMsg")
+	if hasDisable || hasEnable {
+		t.Errorf("should not toggle mouse between content views, got disable=%v enable=%v", hasDisable, hasEnable)
 	}
 }
