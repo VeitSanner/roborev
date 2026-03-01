@@ -1342,12 +1342,8 @@ func (c *acpClient) WaitForTerminalExit(ctx context.Context, params acp.WaitForT
 	terminal, exists := c.getTerminal(params.TerminalId)
 
 	if !exists {
-		// Terminal not found - it may have already been cleaned up
-		// Return a default response indicating the terminal has exited
-		return acp.WaitForTerminalExitResponse{
-			ExitCode: nil, // nil indicates unknown exit status
-			Signal:   nil,
-		}, nil
+		return acp.WaitForTerminalExitResponse{},
+			fmt.Errorf("terminal %s not found", params.TerminalId)
 	}
 
 	// Wait for the command to finish
