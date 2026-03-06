@@ -1506,6 +1506,7 @@ func configuredACPAgent(cfg *config.Config) *ACPAgent {
 // GetAvailableWithConfig resolves an available agent while honoring runtime ACP config.
 // It treats cfg.ACP.Name as an alias for "acp" and applies cfg.ACP command/mode/model
 // at resolution time instead of package-init time.
+// It also applies command overrides for other agents (codex, claude, cursor, pi).
 func GetAvailableWithConfig(preferred string, cfg *config.Config) (Agent, error) {
 	rawPreferred := strings.TrimSpace(preferred)
 	preferred = resolveAlias(rawPreferred)
@@ -1539,6 +1540,39 @@ func GetAvailableWithConfig(preferred string, cfg *config.Config) (Agent, error)
 		}
 		return resolved, nil
 	}
+
+	// Apply command overrides from config.
+	// Clone agent instances before mutating to avoid contaminating the
+	// global registry — concurrent callers share those singletons.
+	if cfg != nil {
+		switch agent := resolved.(type) {
+		case *CodexAgent:
+			if cfg.CodexCmd != "" {
+				clone := *agent
+				clone.Command = cfg.CodexCmd
+				resolved = &clone
+			}
+		case *ClaudeAgent:
+			if cfg.ClaudeCodeCmd != "" {
+				clone := *agent
+				clone.Command = cfg.ClaudeCodeCmd
+				resolved = &clone
+			}
+		case *CursorAgent:
+			if cfg.CursorCmd != "" {
+				clone := *agent
+				clone.Command = cfg.CursorCmd
+				resolved = &clone
+			}
+		case *PiAgent:
+			if cfg.PiCmd != "" {
+				clone := *agent
+				clone.Command = cfg.PiCmd
+				resolved = &clone
+			}
+		}
+	}
+
 	return resolved, nil
 }
 
