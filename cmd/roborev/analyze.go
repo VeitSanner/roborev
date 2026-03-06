@@ -501,6 +501,7 @@ func enqueueAnalysisJob(serverAddr string, repoRoot, prompt, outputPrefix, label
 	if opts.branch != "" && opts.branch != "HEAD" {
 		branch = opts.branch
 	}
+
 	reqBody, _ := json.Marshal(daemon.EnqueueRequest{
 		RepoPath:     repoRoot,
 		GitRef:       label, // Use analysis type name as the TUI label
@@ -798,9 +799,18 @@ func runFixAgent(cmd *cobra.Command, repoPath, agentName, model, reasoning, prom
 		return fmt.Errorf("resolve fix reasoning: %w", reasonErr)
 	}
 
-	// Resolve agent and model via fix workflow config
+	// Resolve agent and model via fix workflow config.
+	// When the agent is explicitly overridden but the model is not,
+	// skip generic default_model (it's paired with default_agent).
+	configAgent := config.ResolveAgentForWorkflow("", repoPath, cfg, "fix", reasoning)
+	cliAgentChanged := agentName != "" &&
+		agent.CanonicalName(agentName) != agent.CanonicalName(configAgent)
 	agentName = config.ResolveAgentForWorkflow(agentName, repoPath, cfg, "fix", reasoning)
-	model = config.ResolveModelForWorkflow(model, repoPath, cfg, "fix", reasoning)
+	if cliAgentChanged && model == "" {
+		model = config.ResolveWorkflowModel(repoPath, cfg, "fix", reasoning)
+	} else {
+		model = config.ResolveModelForWorkflow(model, repoPath, cfg, "fix", reasoning)
+	}
 
 	a, err := agent.GetAvailableWithConfig(agentName, cfg)
 	if err != nil {

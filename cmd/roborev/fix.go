@@ -294,6 +294,25 @@ func fixJobDirect(ctx context.Context, params fixJobParams, prompt string) (*fix
 	return &fixJobResult{NoChanges: !hasChanges, AgentOutput: agentOutput}, nil
 }
 
+// resolveFixModel determines the model for a fix operation, skipping
+// generic default_model when the CLI agent differs from config default.
+func resolveFixModel(
+	cliAgent, cliModel, repoPath string,
+	cfg *config.Config, reasoning string,
+) string {
+	configAgent := config.ResolveAgentForWorkflow(
+		"", repoPath, cfg, "fix", reasoning,
+	)
+	cliAgentChanged := cliAgent != "" &&
+		agent.CanonicalName(cliAgent) != agent.CanonicalName(configAgent)
+	if cliAgentChanged && cliModel == "" {
+		return config.ResolveWorkflowModel(repoPath, cfg, "fix", reasoning)
+	}
+	return config.ResolveModelForWorkflow(
+		cliModel, repoPath, cfg, "fix", reasoning,
+	)
+}
+
 // resolveFixAgent resolves and configures the agent for fix operations.
 func resolveFixAgent(repoPath string, opts fixOptions) (agent.Agent, error) {
 	cfg, err := config.LoadGlobal()
@@ -307,7 +326,7 @@ func resolveFixAgent(repoPath string, opts fixOptions) (agent.Agent, error) {
 	}
 
 	agentName := config.ResolveAgentForWorkflow(opts.agentName, repoPath, cfg, "fix", reasoning)
-	modelStr := config.ResolveModelForWorkflow(opts.model, repoPath, cfg, "fix", reasoning)
+	modelStr := resolveFixModel(opts.agentName, opts.model, repoPath, cfg, reasoning)
 
 	a, err := agent.GetAvailableWithConfig(agentName, cfg)
 	if err != nil {
@@ -368,12 +387,15 @@ func runFixWithSeen(cmd *cobra.Command, jobIDs []int64, opts fixOptions, seen ma
 				}
 			}
 			if err != nil {
-				if len(jobIDs) == 1 {
-					return err
+				// In discovery mode (seen != nil), log a warning and
+				// continue best-effort. For explicit job IDs (seen ==
+				// nil), return the error so the CLI exits non-zero.
+				if seen != nil {
+					cmd.Printf("Warning: error fixing job %d: %v\n", jobID, err)
+					seen[jobID] = true
+					continue
 				}
-				if !opts.quiet {
-					cmd.Printf("Error fixing job %d: %v\n", jobID, err)
-				}
+				return fmt.Errorf("error fixing job %d: %w", jobID, err)
 			}
 		}
 		// Mark as seen so the re-query loop doesn't retry this job.
@@ -894,9 +916,7 @@ func runFixBatch(cmd *cobra.Command, jobIDs []int64, branch string, newestFirst 
 			fmtr.Flush()
 		}
 		if err != nil {
-			if !opts.quiet {
-				cmd.Printf("Error in batch %d: %v\n", i+1, err)
-			}
+			cmd.Printf("Warning: error in batch %d: %v\n", i+1, err)
 			continue
 		}
 

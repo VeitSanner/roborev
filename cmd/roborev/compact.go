@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/roborev-dev/roborev/internal/agent"
 	"github.com/roborev-dev/roborev/internal/config"
 	"github.com/roborev-dev/roborev/internal/daemon"
 	"github.com/roborev-dev/roborev/internal/git"
@@ -229,9 +230,20 @@ func enqueueConsolidation(ctx context.Context, cmd *cobra.Command, repoRoot stri
 	agentName := config.ResolveAgentForWorkflow(
 		opts.agentName, repoRoot, cfg, "fix", reasoning,
 	)
-	model := config.ResolveModelForWorkflow(
-		opts.model, repoRoot, cfg, "fix", reasoning,
-	)
+	// Resolve model locally for display; the daemon re-resolves with
+	// its own canonical-agent comparison to skip generic default_model
+	// when the agent was overridden on CLI.
+	configAgent := config.ResolveAgentForWorkflow("", repoRoot, cfg, "fix", reasoning)
+	cliAgentChanged := opts.agentName != "" &&
+		agent.CanonicalName(opts.agentName) != agent.CanonicalName(configAgent)
+	var model string
+	if cliAgentChanged && opts.model == "" {
+		model = config.ResolveWorkflowModel(repoRoot, cfg, "fix", reasoning)
+	} else {
+		model = config.ResolveModelForWorkflow(
+			opts.model, repoRoot, cfg, "fix", reasoning,
+		)
+	}
 
 	if !opts.quiet {
 		cmd.Printf("\nRunning verification agent (%s) to check findings against current codebase...\n\n", agentName)
