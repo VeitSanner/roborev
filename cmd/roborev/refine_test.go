@@ -953,6 +953,140 @@ func TestResolveReasoningWithFast(t *testing.T) {
 	}
 }
 
+// TestApplyModelForAgent_BackupKeepsOwnModel verifies that when the backup
+// agent is selected (primary unavailable) and no backup model is configured,
+// applyModelForAgent does not apply the primary model to the backup agent.
+// Regression test for f7385273.
+func TestApplyModelForAgent_BackupKeepsOwnModel(t *testing.T) {
+	// Make only codex available (not gemini, which will be "primary").
+	t.Cleanup(testutil.MockExecutableIsolated(t, "codex", 0))
+
+	selected, err := selectRefineAgent(
+		nil, "gemini", agent.ReasoningStandard, "codex",
+	)
+	if err != nil {
+		t.Fatalf("selectRefineAgent: %v", err)
+	}
+	if selected.Name() != "codex" {
+		t.Fatalf("expected backup agent codex, got %s", selected.Name())
+	}
+
+	// Call the real helper with no CLI model and no config.
+	// The primary would resolve to some default model, but the backup
+	// agent should NOT inherit it.
+	result, model := applyModelForAgent(
+		selected,
+		"gemini", // preferred (unavailable)
+		"codex",  // backup (selected)
+		"",       // no CLI model
+		"",       // no repo path
+		nil,      // no config
+		"refine",
+		"standard",
+	)
+
+	codexAgent, ok := result.(*agent.CodexAgent)
+	if !ok {
+		t.Fatalf("expected *CodexAgent, got %T", result)
+	}
+	if codexAgent.Model != "" {
+		t.Errorf(
+			"backup agent should keep its default model (empty), got %q",
+			codexAgent.Model,
+		)
+	}
+	if model != "" {
+		t.Errorf("resolved model should be empty for unconfigured backup, got %q", model)
+	}
+}
+
+// TestApplyModelForAgent_EmptyModelPreservesAgentDefault verifies that
+// applyModelForAgent does not clear an agent's existing model when the
+// resolved model is empty.
+// Regression test for f7385273.
+func TestApplyModelForAgent_EmptyModelPreservesAgentDefault(t *testing.T) {
+	t.Cleanup(testutil.MockExecutable(t, "codex", 0))
+
+	a, err := agent.Get("codex")
+	if err != nil {
+		t.Fatalf("agent.Get: %v", err)
+	}
+	// Pre-set a model on the agent.
+	a = a.WithModel("o3")
+
+	// Agent is the preferred agent (not a backup). No CLI model, no
+	// config → resolved model will be empty.
+	result, _ := applyModelForAgent(
+		a,
+		"codex", // preferred
+		"",      // no backup
+		"",      // no CLI model
+		"",      // no repo path
+		nil,     // no config
+		"review",
+		"standard",
+	)
+
+	codexAgent, ok := result.(*agent.CodexAgent)
+	if !ok {
+		t.Fatalf("expected *CodexAgent, got %T", result)
+	}
+	if codexAgent.Model != "o3" {
+		t.Errorf(
+			"agent model should remain %q, got %q",
+			"o3", codexAgent.Model,
+		)
+	}
+}
+
+// TestApplyModelForAgent_SameAgentPrimaryAndBackup verifies that when
+// primary and backup resolve to the same agent, the agent is treated as
+// the primary (not backup) and gets the workflow model, not the backup model.
+func TestApplyModelForAgent_SameAgentPrimaryAndBackup(t *testing.T) {
+	t.Cleanup(testutil.MockExecutable(t, "codex", 0))
+
+	a, err := agent.Get("codex")
+	if err != nil {
+		t.Fatalf("agent.Get: %v", err)
+	}
+
+	// Config with distinct primary and backup models so we can tell
+	// which resolution path was taken.
+	cfg := &config.Config{
+		ReviewModel:       "primary-model",
+		ReviewBackupModel: "backup-model",
+	}
+
+	// Primary and backup are the same agent. The helper should NOT
+	// treat this as "using backup" — the CanonicalName comparison
+	// against preferredAgent must prevent that.
+	result, model := applyModelForAgent(
+		a,
+		"codex", // preferred (same as backup)
+		"codex", // backup (same as preferred)
+		"",      // no CLI model
+		"",      // no repo path
+		cfg,
+		"review",
+		"standard",
+	)
+
+	codexAgent, ok := result.(*agent.CodexAgent)
+	if !ok {
+		t.Fatalf("expected *CodexAgent, got %T", result)
+	}
+	// Should pick the primary workflow model, not the backup.
+	if model != "primary-model" {
+		t.Errorf("expected primary model %q, got %q", "primary-model", model)
+	}
+	if codexAgent.Model != "primary-model" {
+		t.Errorf(
+			"expected agent model %q, got %q",
+			"primary-model", codexAgent.Model,
+		)
+	}
+}
+
 func TestRefineFlagValidation(t *testing.T) {
 	tests := []struct {
 		name    string

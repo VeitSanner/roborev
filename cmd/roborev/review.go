@@ -379,20 +379,23 @@ func runLocalReview(cmd *cobra.Command, repoPath, gitRef, diffContent, agentName
 	}
 
 	// Resolve agent using workflow-specific resolution (matches daemon behavior)
-	agentName = config.ResolveAgentForWorkflow(agentName, repoPath, cfg, workflow, reasoning)
+	preferredAgent := config.ResolveAgentForWorkflow(agentName, repoPath, cfg, workflow, reasoning)
+	backupAgent := config.ResolveBackupAgentForWorkflow(repoPath, cfg, workflow)
 
-	// Get the agent
-	a, err := agent.GetAvailableWithConfig(agentName, cfg)
+	// Get the agent (try backup before hardcoded chain)
+	a, err := agent.GetAvailableWithConfig(preferredAgent, cfg, backupAgent)
 	if err != nil {
 		return fmt.Errorf("get agent: %w", err)
 	}
 
-	// Resolve model using workflow-specific resolution (matches daemon behavior)
-	model = config.ResolveModelForWorkflow(model, repoPath, cfg, workflow, reasoning)
-
-	// Configure agent with model and reasoning
+	// Configure agent with model and reasoning. applyModelForAgent
+	// handles backup-vs-primary model resolution.
 	reasoningLevel := agent.ParseReasoningLevel(reasoning)
-	a = a.WithReasoning(reasoningLevel).WithModel(model)
+	a = a.WithReasoning(reasoningLevel)
+	a, model = applyModelForAgent(
+		a, preferredAgent, backupAgent,
+		model, repoPath, cfg, workflow, reasoning,
+	)
 
 	// Configure provider for pi agent
 	if provider != "" {
