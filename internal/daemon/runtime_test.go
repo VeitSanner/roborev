@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -11,6 +12,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/roborev-dev/roborev/internal/testenv"
 )
@@ -100,6 +102,30 @@ func TestFindAvailablePort_Ephemeral(t *testing.T) {
 	expectedAddr := fmt.Sprintf("127.0.0.1:%d", port)
 	if addr != expectedAddr {
 		t.Errorf("Expected address %q, got %q", expectedAddr, addr)
+	}
+}
+
+func TestFindAvailablePort_IPv6Loopback(t *testing.T) {
+	ln, err := net.Listen("tcp", "[::1]:0")
+	if err != nil {
+		t.Skipf("IPv6 loopback not available: %v", err)
+	}
+	ln.Close()
+
+	addr, port, err := FindAvailablePort("[::1]:0")
+	if err != nil {
+		t.Fatalf("FindAvailablePort failed for IPv6 loopback: %v", err)
+	}
+
+	host, portText, err := net.SplitHostPort(addr)
+	if err != nil {
+		t.Fatalf("returned address %q is invalid: %v", addr, err)
+	}
+	if host != "::1" {
+		t.Fatalf("expected host ::1, got %q", host)
+	}
+	if portText == "0" || port == 0 {
+		t.Fatalf("expected an assigned port, got addr=%q port=%d", addr, port)
 	}
 }
 
@@ -303,7 +329,47 @@ func TestIsLoopbackAddr(t *testing.T) {
 	}
 }
 
-func TestIsDaemonAliveStatusCodes(t *testing.T) {
+func TestProbeDaemonPrefersPing(t *testing.T) {
+	addr, mux := startMockDaemon(t)
+	mux.HandleFunc("/api/ping", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(PingInfo{
+			Service: daemonServiceName,
+			Version: "v-test",
+			PID:     123,
+		})
+	})
+
+	info, err := ProbeDaemon(addr, time.Second)
+	if err != nil {
+		t.Fatalf("ProbeDaemon failed: %v", err)
+	}
+	if info.Service != daemonServiceName {
+		t.Fatalf("ProbeDaemon service = %q, want %q", info.Service, daemonServiceName)
+	}
+	if info.Version != "v-test" {
+		t.Fatalf("ProbeDaemon version = %q, want %q", info.Version, "v-test")
+	}
+}
+
+func TestProbeDaemonFallsBackToLegacyStatus(t *testing.T) {
+	addr, mux := startMockDaemon(t)
+	mux.HandleFunc("/api/ping", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	})
+	mux.HandleFunc("/api/status", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]string{"version": "v-legacy"})
+	})
+
+	info, err := ProbeDaemon(addr, time.Second)
+	if err != nil {
+		t.Fatalf("ProbeDaemon legacy fallback failed: %v", err)
+	}
+	if info.Version != "v-legacy" {
+		t.Fatalf("ProbeDaemon version = %q, want %q", info.Version, "v-legacy")
+	}
+}
+
+func TestIsDaemonAliveLegacyStatusCodes(t *testing.T) {
 	tests := []struct {
 		name       string
 		statusCode int
@@ -334,8 +400,14 @@ func TestIsDaemonAliveStatusCodes(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			addr, mux := startMockDaemon(t)
-			mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+			mux.HandleFunc("/api/ping", func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusNotFound)
+			})
+			mux.HandleFunc("/api/status", func(w http.ResponseWriter, r *http.Request) {
 				w.WriteHeader(tt.statusCode)
+				if tt.statusCode >= 200 && tt.statusCode < 300 {
+					_ = json.NewEncoder(w).Encode(map[string]string{"version": "v-legacy"})
+				}
 			})
 			got := IsDaemonAlive(addr)
 			if got != tt.wantAlive {
