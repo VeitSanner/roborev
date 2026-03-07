@@ -428,6 +428,130 @@ func TestIsBranchExcluded(t *testing.T) {
 	}
 }
 
+func TestIsCommitMessageExcluded(t *testing.T) {
+	tests := []struct {
+		name       string
+		repoConfig string
+		message    string
+		want       bool
+	}{
+		{
+			name:    "no config file",
+			message: "fix: update handler",
+			want:    false,
+		},
+		{
+			name:       "empty excluded_commit_patterns",
+			repoConfig: `agent = "codex"`,
+			message:    "fix: update handler",
+			want:       false,
+		},
+		{
+			name:       "message matches pattern",
+			repoConfig: `excluded_commit_patterns = ["[skip review]"]`,
+			message:    "wip: quick fix [skip review]",
+			want:       true,
+		},
+		{
+			name:       "message matches one of several patterns",
+			repoConfig: `excluded_commit_patterns = ["[skip review]", "[wip]", "[no review]"]`,
+			message:    "checkpoint [wip]",
+			want:       true,
+		},
+		{
+			name:       "message does not match",
+			repoConfig: `excluded_commit_patterns = ["[skip review]", "[wip]"]`,
+			message:    "feat: add new endpoint",
+			want:       false,
+		},
+		{
+			name:       "case insensitive match",
+			repoConfig: `excluded_commit_patterns = ["[Skip Review]"]`,
+			message:    "wip: quick fix [SKIP REVIEW]",
+			want:       true,
+		},
+		{
+			name:       "pattern in body not just subject",
+			repoConfig: `excluded_commit_patterns = ["[skip review]"]`,
+			message:    "feat: add feature\n\nsome details [skip review]",
+			want:       true,
+		},
+		{
+			name:       "empty pattern is ignored",
+			repoConfig: `excluded_commit_patterns = [""]`,
+			message:    "any commit message",
+			want:       false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tmpDir := newTempRepo(t, tt.repoConfig)
+			got := IsCommitMessageExcluded(tmpDir, tt.message)
+			if got != tt.want {
+				t.Errorf("IsCommitMessageExcluded(%q) = %v, want %v", tt.message, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestAllCommitMessagesExcluded(t *testing.T) {
+	tests := []struct {
+		name       string
+		repoConfig string
+		messages   []string
+		want       bool
+	}{
+		{
+			name:     "empty messages returns false",
+			messages: nil,
+			want:     false,
+		},
+		{
+			name:       "all match",
+			repoConfig: `excluded_commit_patterns = ["[wip]"]`,
+			messages: []string{
+				"[wip] checkpoint 1",
+				"[wip] checkpoint 2",
+			},
+			want: true,
+		},
+		{
+			name:       "one does not match",
+			repoConfig: `excluded_commit_patterns = ["[wip]"]`,
+			messages: []string{
+				"[wip] checkpoint",
+				"feat: real work",
+			},
+			want: false,
+		},
+		{
+			name:     "no config file",
+			messages: []string{"[wip] anything"},
+			want:     false,
+		},
+		{
+			name:       "no patterns configured",
+			repoConfig: `agent = "codex"`,
+			messages:   []string{"[wip] anything"},
+			want:       false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tmpDir := newTempRepo(t, tt.repoConfig)
+			got := AllCommitMessagesExcluded(tmpDir, tt.messages)
+			if got != tt.want {
+				t.Errorf(
+					"AllCommitMessagesExcluded() = %v, want %v",
+					got, tt.want,
+				)
+			}
+		})
+	}
+}
+
 func TestSyncConfigPostgresURLExpanded(t *testing.T) {
 	t.Run("empty URL returns empty", func(t *testing.T) {
 		cfg := SyncConfig{}

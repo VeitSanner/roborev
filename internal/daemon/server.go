@@ -750,8 +750,37 @@ func (s *Server) handleEnqueue(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// Store as full SHA range
+		// Check if all commits in the range are excluded.
+		// Only skip when every commit was successfully read
+		// and every message matches — any GetCommitInfo failure
+		// means we can't prove all are excluded.
 		fullRef := startSHA + ".." + endSHA
+		if rangeCommits, rcErr := git.GetRangeCommits(
+			gitCwd, fullRef,
+		); rcErr == nil && len(rangeCommits) > 0 {
+			messages := make([]string, 0, len(rangeCommits))
+			allRead := true
+			for _, rc := range rangeCommits {
+				ci, ciErr := git.GetCommitInfo(repoRoot, rc)
+				if ciErr != nil {
+					allRead = false
+					break
+				}
+				messages = append(
+					messages, ci.Subject+"\n"+ci.Body,
+				)
+			}
+			if allRead && config.AllCommitMessagesExcluded(
+				repoRoot, messages,
+			) {
+				writeJSON(w, map[string]any{
+					"skipped": true,
+					"reason":  "all commits in range match excluded patterns",
+				})
+				return
+			}
+		}
+
 		job, err = s.db.EnqueueJob(storage.EnqueueOpts{
 			RepoID:     repo.ID,
 			GitRef:     fullRef,
@@ -778,6 +807,16 @@ func (s *Server) handleEnqueue(w http.ResponseWriter, r *http.Request) {
 		info, err := git.GetCommitInfo(repoRoot, sha)
 		if err != nil {
 			writeError(w, http.StatusBadRequest, fmt.Sprintf("get commit info: %v", err))
+			return
+		}
+
+		// Check if commit message matches an excluded pattern
+		fullMessage := info.Subject + "\n" + info.Body
+		if config.IsCommitMessageExcluded(repoRoot, fullMessage) {
+			writeJSON(w, map[string]any{
+				"skipped": true,
+				"reason":  "commit message matches an excluded pattern",
+			})
 			return
 		}
 
