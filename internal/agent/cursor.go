@@ -8,7 +8,6 @@ import (
 	"os"
 	"os/exec"
 	"strings"
-	"time"
 )
 
 // CursorAgent runs code reviews using the Cursor agent CLI
@@ -112,7 +111,7 @@ func (a *CursorAgent) Review(ctx context.Context, repoPath, commitSHA, prompt st
 	cmd := exec.CommandContext(ctx, a.Command, args...)
 	cmd.Dir = repoPath
 	cmd.Env = os.Environ()
-	cmd.WaitDelay = 5 * time.Second
+	tracker := configureSubprocess(cmd)
 	cmd.Stdin = strings.NewReader(prompt)
 
 	var stderr bytes.Buffer
@@ -120,6 +119,8 @@ func (a *CursorAgent) Review(ctx context.Context, repoPath, commitSHA, prompt st
 	if err != nil {
 		return "", fmt.Errorf("create stdout pipe: %w", err)
 	}
+	stopClosingPipe := closeOnContextDone(ctx, stdoutPipe)
+	defer stopClosingPipe()
 	cmd.Stderr = &stderr
 
 	if err := cmd.Start(); err != nil {
@@ -130,10 +131,17 @@ func (a *CursorAgent) Review(ctx context.Context, repoPath, commitSHA, prompt st
 	result, err := a.parseStreamJSON(stdoutPipe, output)
 
 	if waitErr := cmd.Wait(); waitErr != nil {
+		if ctxErr := contextProcessError(ctx, tracker, waitErr, err); ctxErr != nil {
+			return "", ctxErr
+		}
 		if err != nil {
 			return "", fmt.Errorf("cursor agent failed: %w (parse error: %v)\nstderr: %s", waitErr, err, stderr.String())
 		}
 		return "", fmt.Errorf("cursor agent failed: %w\nstderr: %s", waitErr, stderr.String())
+	}
+
+	if ctxErr := contextProcessError(ctx, tracker, nil, err); ctxErr != nil {
+		return "", ctxErr
 	}
 
 	if err != nil {

@@ -93,6 +93,7 @@ func (a *OpenCodeAgent) Review(
 	cmd := exec.CommandContext(ctx, a.Command, args...)
 	cmd.Dir = repoPath
 	cmd.Stdin = strings.NewReader(prompt)
+	tracker := configureSubprocess(cmd)
 
 	// Share a single syncWriter so stdout and stderr writes
 	// to the output writer are serialized by one mutex.
@@ -109,6 +110,8 @@ func (a *OpenCodeAgent) Review(
 	if err != nil {
 		return "", fmt.Errorf("create stdout pipe: %w", err)
 	}
+	stopClosingPipe := closeOnContextDone(ctx, stdoutPipe)
+	defer stopClosingPipe()
 
 	if err := cmd.Start(); err != nil {
 		return "", fmt.Errorf("start opencode: %w", err)
@@ -124,6 +127,9 @@ func (a *OpenCodeAgent) Review(
 	_, _ = io.Copy(io.Discard, stdoutPipe)
 
 	if waitErr := cmd.Wait(); waitErr != nil {
+		if ctxErr := contextProcessError(ctx, tracker, waitErr, parseErr); ctxErr != nil {
+			return "", ctxErr
+		}
 		var detail strings.Builder
 		fmt.Fprintf(&detail, "opencode failed")
 		if parseErr != nil {
@@ -140,6 +146,10 @@ func (a *OpenCodeAgent) Review(
 			fmt.Fprintf(&detail, "\npartial output: %s", partial)
 		}
 		return "", fmt.Errorf("%s: %w", detail.String(), waitErr)
+	}
+
+	if ctxErr := contextProcessError(ctx, tracker, nil, parseErr); ctxErr != nil {
+		return "", ctxErr
 	}
 
 	if parseErr != nil {

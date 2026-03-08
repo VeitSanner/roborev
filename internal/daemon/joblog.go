@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"log"
@@ -14,6 +15,10 @@ import (
 	"github.com/roborev-dev/roborev/internal/config"
 )
 
+var jobLogOpenRetryInterval = 5 * time.Second
+
+const maxBufferedJobLogBytes = 256 * 1024
+
 // JobLogDir returns the directory for per-job log files.
 func JobLogDir() string {
 	return filepath.Join(config.DataDir(), "logs", "jobs")
@@ -24,30 +29,35 @@ func JobLogPath(jobID int64) string {
 	return filepath.Join(JobLogDir(), fmt.Sprintf("%d.log", jobID))
 }
 
-// openJobLog creates the log directory and opens a log file for the
-// given job. Returns nil if the file cannot be created (logged, not
-// fatal — the review still runs without disk logging).
-func openJobLog(jobID int64) *os.File {
+func openJobLogFile(jobID int64, flags int) (*os.File, error) {
 	dir := JobLogDir()
 	if err := os.MkdirAll(dir, 0700); err != nil {
-		log.Printf("Warning: cannot create job log dir %s: %v", dir, err)
-		return nil
+		return nil, fmt.Errorf("create job log dir %s: %w", dir, err)
 	}
 	// Tighten pre-existing directories from older installs.
 	if err := os.Chmod(dir, 0700); err != nil {
 		log.Printf("Warning: cannot chmod job log dir: %v", err)
 	}
 	path := JobLogPath(jobID)
-	f, err := os.OpenFile(
-		path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600,
-	)
+	f, err := os.OpenFile(path, flags, 0600)
 	if err != nil {
-		log.Printf("Warning: cannot create job log file for job %d: %v", jobID, err)
-		return nil
+		return nil, fmt.Errorf("open job log file for job %d: %w", jobID, err)
 	}
 	// Tighten pre-existing files from older installs.
 	if err := f.Chmod(0600); err != nil {
 		log.Printf("Warning: cannot chmod job log file: %v", err)
+	}
+	return f, nil
+}
+
+// openJobLog creates the log directory and opens a log file for the
+// given job. Returns nil if the file cannot be created (logged, not
+// fatal — the review still runs without disk logging).
+func openJobLog(jobID int64) *os.File {
+	f, err := openJobLogFile(jobID, os.O_CREATE|os.O_WRONLY|os.O_TRUNC)
+	if err != nil {
+		log.Printf("Warning: cannot create job log file for job %d: %v", jobID, err)
+		return nil
 	}
 	return f
 }
@@ -105,26 +115,158 @@ func ParseJobIDFromLogName(name string) (int64, bool) {
 	return id, true
 }
 
-// safeWriter wraps an io.Writer and silently drops writes after the
-// first error. This prevents a full-disk condition from killing the
-// agent subprocess via a broken-pipe through io.MultiWriter.
-type safeWriter struct {
-	mu     sync.Mutex
-	w      io.Writer
-	failed bool
+// jobLogWriter retries transient log-file open/write failures while buffering
+// a bounded amount of output in memory so jobs still get on-disk logs once the
+// filesystem recovers.
+type jobLogWriter struct {
+	mu      sync.Mutex
+	jobID   int64
+	f       io.WriteCloser
+	buf     bytes.Buffer
+	notice  bytes.Buffer
+	lastTry time.Time
+	dropped int
+	noticed int
 }
 
-func (s *safeWriter) Write(p []byte) (int, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.failed {
-		return len(p), nil
+func newJobLogWriter(jobID int64) *jobLogWriter {
+	w := &jobLogWriter{jobID: jobID}
+	w.tryOpenLocked(true)
+	return w
+}
+
+func (w *jobLogWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	origLen := len(p)
+	if origLen == 0 {
+		return 0, nil
 	}
-	n, err := s.w.Write(p)
+	if w.f == nil && time.Since(w.lastTry) >= jobLogOpenRetryInterval {
+		w.tryOpenLocked(false)
+	}
+	if w.f != nil {
+		if err := w.flushBufferedLocked(); err == nil {
+			n, err := w.f.Write(p)
+			if err == nil && n == len(p) {
+				return origLen, nil
+			}
+			if n > 0 {
+				p = p[n:]
+			}
+			if err == nil {
+				err = io.ErrShortWrite
+			}
+			w.handleWriteFailureLocked(err)
+		} else {
+			w.handleWriteFailureLocked(err)
+		}
+	}
+	w.bufferLocked(p)
+	return origLen, nil
+}
+
+func (w *jobLogWriter) Close() error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.f == nil {
+		w.tryOpenLocked(false)
+	}
+	if w.f == nil {
+		return nil
+	}
+	if err := w.flushBufferedLocked(); err != nil {
+		w.handleWriteFailureLocked(err)
+		return nil
+	}
+	f := w.f
+	w.f = nil
+	return f.Close()
+}
+
+func (w *jobLogWriter) tryOpenLocked(truncate bool) {
+	w.lastTry = time.Now()
+	flags := os.O_CREATE | os.O_WRONLY
+	if truncate {
+		flags |= os.O_TRUNC
+	} else {
+		flags |= os.O_APPEND
+	}
+	f, err := openJobLogFile(w.jobID, flags)
 	if err != nil {
-		s.failed = true
-		log.Printf("Warning: job log write failed, disabling: %v", err)
-		return len(p), nil
+		log.Printf("Warning: cannot open job log file for job %d: %v", w.jobID, err)
+		return
 	}
-	return n, nil
+	w.f = f
+}
+
+func (w *jobLogWriter) flushBufferedLocked() error {
+	for {
+		if w.f == nil {
+			return nil
+		}
+		if w.notice.Len() > 0 {
+			if err := w.flushBufferLocked(&w.notice); err != nil {
+				return err
+			}
+			w.dropped -= w.noticed
+			if w.dropped < 0 {
+				w.dropped = 0
+			}
+			w.noticed = 0
+			continue
+		}
+		if err := w.flushBufferLocked(&w.buf); err != nil {
+			return err
+		}
+		if w.dropped == 0 {
+			return nil
+		}
+		w.noticed = w.dropped
+		fmt.Fprintf(&w.notice,
+			"[roborev] dropped %d log bytes while disk logging was unavailable\n",
+			w.noticed,
+		)
+	}
+}
+
+func (w *jobLogWriter) handleWriteFailureLocked(err error) {
+	if w.f != nil {
+		_ = w.f.Close()
+		w.f = nil
+	}
+	log.Printf("Warning: job log write failed for job %d, retrying later: %v", w.jobID, err)
+}
+
+func (w *jobLogWriter) bufferLocked(p []byte) {
+	if len(p) == 0 {
+		return
+	}
+	if w.buf.Len() >= maxBufferedJobLogBytes {
+		w.dropped += len(p)
+		return
+	}
+	remaining := maxBufferedJobLogBytes - w.buf.Len()
+	if len(p) <= remaining {
+		_, _ = w.buf.Write(p)
+		return
+	}
+	_, _ = w.buf.Write(p[:remaining])
+	w.dropped += len(p) - remaining
+}
+
+func (w *jobLogWriter) flushBufferLocked(buf *bytes.Buffer) error {
+	for buf.Len() > 0 {
+		n, err := w.f.Write(buf.Bytes())
+		if n > 0 {
+			buf.Next(n)
+		}
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return io.ErrShortWrite
+		}
+	}
+	return nil
 }

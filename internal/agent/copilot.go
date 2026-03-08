@@ -85,6 +85,7 @@ func (a *CopilotAgent) Review(ctx context.Context, repoPath, commitSHA, prompt s
 	cmd := exec.CommandContext(ctx, a.Command, args...)
 	cmd.Stdin = strings.NewReader(prompt)
 	cmd.Dir = repoPath
+	tracker := configureSubprocess(cmd)
 
 	var stdout, stderr bytes.Buffer
 	if sw := newSyncWriter(output); sw != nil {
@@ -96,6 +97,9 @@ func (a *CopilotAgent) Review(ctx context.Context, repoPath, commitSHA, prompt s
 	}
 
 	if err := cmd.Run(); err != nil {
+		if ctxErr := contextProcessError(ctx, tracker, err, nil); ctxErr != nil {
+			return "", ctxErr
+		}
 		return "", fmt.Errorf("copilot failed: %w\nstderr: %s", err, stderr.String())
 	}
 

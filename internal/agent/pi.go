@@ -158,6 +158,7 @@ func (a *PiAgent) Review(
 
 	cmd := exec.CommandContext(ctx, a.Command, args...)
 	cmd.Dir = repoPath
+	tracker := configureSubprocess(cmd)
 
 	// Capture stdout for the result
 	var stdoutBuf bytes.Buffer
@@ -174,6 +175,9 @@ func (a *PiAgent) Review(
 	}
 
 	if err := cmd.Run(); err != nil {
+		if ctxErr := contextProcessError(ctx, tracker, err, nil); ctxErr != nil {
+			return "", ctxErr
+		}
 		return "", fmt.Errorf("pi failed: %w\nstderr: %s", err, stderrBuf.String())
 	}
 

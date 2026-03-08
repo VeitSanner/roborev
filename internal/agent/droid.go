@@ -104,6 +104,7 @@ func (a *DroidAgent) Review(ctx context.Context, repoPath, commitSHA, prompt str
 	cmd := exec.CommandContext(ctx, a.Command, args...)
 	cmd.Dir = repoPath
 	cmd.Stdin = strings.NewReader(prompt)
+	tracker := configureSubprocess(cmd)
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -114,6 +115,9 @@ func (a *DroidAgent) Review(ctx context.Context, repoPath, commitSHA, prompt str
 	}
 
 	if err := cmd.Run(); err != nil {
+		if ctxErr := contextProcessError(ctx, tracker, err, nil); ctxErr != nil {
+			return "", ctxErr
+		}
 		return "", fmt.Errorf("droid failed: %w\nstderr: %s", err, stderr.String())
 	}
 

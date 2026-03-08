@@ -11,7 +11,6 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
-	"time"
 )
 
 // CodexAgent runs code reviews using the Codex CLI
@@ -196,7 +195,7 @@ func (a *CodexAgent) Review(ctx context.Context, repoPath, commitSHA, prompt str
 
 	cmd := exec.CommandContext(ctx, a.Command, args...)
 	cmd.Dir = repoPath
-	cmd.WaitDelay = 5 * time.Second
+	tracker := configureSubprocess(cmd)
 
 	// Pipe prompt via stdin to avoid command line length limits on Windows.
 	// Windows has a ~32KB limit on command line arguments, which large diffs easily exceed.
@@ -210,6 +209,8 @@ func (a *CodexAgent) Review(ctx context.Context, repoPath, commitSHA, prompt str
 	if err != nil {
 		return "", fmt.Errorf("create stdout pipe: %w", err)
 	}
+	stopClosingPipe := closeOnContextDone(ctx, stdoutPipe)
+	defer stopClosingPipe()
 	// Tee stderr to output writer for live error visibility
 	if sw != nil {
 		cmd.Stderr = io.MultiWriter(&stderr, sw)
@@ -225,10 +226,17 @@ func (a *CodexAgent) Review(ctx context.Context, repoPath, commitSHA, prompt str
 	result, parseErr := a.parseStreamJSON(stdoutPipe, sw)
 
 	if waitErr := cmd.Wait(); waitErr != nil {
+		if ctxErr := contextProcessError(ctx, tracker, waitErr, parseErr); ctxErr != nil {
+			return "", ctxErr
+		}
 		if parseErr != nil {
 			return "", fmt.Errorf("codex failed: %w (parse error: %v)\nstderr: %s", waitErr, parseErr, stderr.String())
 		}
 		return "", fmt.Errorf("codex failed: %w\nstderr: %s", waitErr, stderr.String())
+	}
+
+	if ctxErr := contextProcessError(ctx, tracker, nil, parseErr); ctxErr != nil {
+		return "", ctxErr
 	}
 
 	if parseErr != nil {
