@@ -3,8 +3,6 @@ package main
 import (
 	"bytes"
 	"encoding/json"
-	"github.com/roborev-dev/roborev/internal/storage"
-	"github.com/spf13/cobra"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -14,6 +12,11 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+
+	"github.com/spf13/cobra"
+	"github.com/stretchr/testify/require"
+
+	"github.com/roborev-dev/roborev/internal/storage"
 )
 
 // TestGitRepo wraps a temporary git repository for test use.
@@ -30,9 +33,8 @@ func newTestGitRepo(t *testing.T) *TestGitRepo {
 	}
 	dir := t.TempDir()
 	resolved, err := filepath.EvalSymlinks(dir)
-	if err != nil {
-		t.Fatalf("Failed to resolve symlinks: %v", err)
-	}
+	require.NoError(t, err, "Failed to resolve symlinks: %v")
+
 	r := &TestGitRepo{Dir: resolved, t: t}
 	r.Run("init")
 	r.Run("config", "user.email", "test@test.com")
@@ -44,12 +46,10 @@ func newTestGitRepo(t *testing.T) *TestGitRepo {
 func chdir(t *testing.T, dir string) {
 	t.Helper()
 	orig, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("Failed to getwd: %v", err)
-	}
-	if err := os.Chdir(dir); err != nil {
-		t.Fatalf("Failed to chdir: %v", err)
-	}
+	require.NoError(t, err, "Failed to getwd: %v")
+
+	err = os.Chdir(dir)
+	require.NoError(t, err, "Failed to chdir: %v")
 	t.Cleanup(func() { os.Chdir(orig) })
 }
 
@@ -84,9 +84,7 @@ func (r *TestGitRepo) Run(args ...string) string {
 	}
 	cmd.Env = gitEnv
 	out, err := cmd.CombinedOutput()
-	if err != nil {
-		r.t.Fatalf("git %v failed: %v\n%s", args, err, out)
-	}
+	require.NoError(r.t, err, "git %v failed:\n%s", args, out)
 	return strings.TrimSpace(string(out))
 }
 
@@ -95,12 +93,10 @@ func (r *TestGitRepo) Run(args ...string) string {
 func (r *TestGitRepo) CommitFile(name, content, msg string) string {
 	r.t.Helper()
 	fullPath := filepath.Join(r.Dir, name)
-	if err := os.MkdirAll(filepath.Dir(fullPath), 0755); err != nil {
-		r.t.Fatal(err)
-	}
-	if err := os.WriteFile(fullPath, []byte(content), 0644); err != nil {
-		r.t.Fatal(err)
-	}
+	err := os.MkdirAll(filepath.Dir(fullPath), 0755)
+	require.NoError(r.t, err)
+	err = os.WriteFile(fullPath, []byte(content), 0644)
+	require.NoError(r.t, err)
 	r.Run("add", name)
 	r.Run("commit", "-m", msg)
 	return r.Run("rev-parse", "HEAD")
@@ -146,12 +142,10 @@ func writeFiles(t *testing.T, dir string, files map[string]string) {
 	t.Helper()
 	for path, content := range files {
 		fullPath := filepath.Join(dir, path)
-		if err := os.MkdirAll(filepath.Dir(fullPath), 0755); err != nil {
-			t.Fatalf("mkdir: %v", err)
-		}
-		if err := os.WriteFile(fullPath, []byte(content), 0644); err != nil {
-			t.Fatalf("write %s: %v", path, err)
-		}
+		err := os.MkdirAll(filepath.Dir(fullPath), 0755)
+		require.NoError(t, err, "mkdir: %v")
+		err = os.WriteFile(fullPath, []byte(content), 0644)
+		require.NoError(t, err, "write %s: %v", path, err)
 	}
 }
 
@@ -184,9 +178,8 @@ func runShowCmd(t *testing.T, args ...string) string {
 	cmd := showCmd()
 	cmd.SetArgs(args)
 	return captureStdout(t, func() {
-		if err := cmd.Execute(); err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
+		err := cmd.Execute()
+		require.NoError(t, err)
 	})
 }
 

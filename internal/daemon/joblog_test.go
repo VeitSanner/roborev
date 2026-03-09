@@ -9,24 +9,23 @@ import (
 	"runtime"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestJobLogDir(t *testing.T) {
 	tmpDir := setupTestEnv(t)
 	got := JobLogDir()
 	want := filepath.Join(tmpDir, "logs", "jobs")
-	if got != want {
-		t.Errorf("JobLogDir() = %q, want %q", got, want)
-	}
+	assert.Equal(t, want, got)
 }
 
 func TestJobLogPath(t *testing.T) {
 	tmpDir := setupTestEnv(t)
 	got := JobLogPath(42)
 	want := filepath.Join(tmpDir, "logs", "jobs", "42.log")
-	if got != want {
-		t.Errorf("JobLogPath(42) = %q, want %q", got, want)
-	}
+	assert.Equal(t, want, got)
 }
 
 func assertStrictPerms(t *testing.T, path string) {
@@ -35,46 +34,35 @@ func assertStrictPerms(t *testing.T, path string) {
 		return
 	}
 	info, err := os.Stat(path)
-	if err != nil {
-		t.Fatalf("stat: %v", err)
-	}
-	if info.Mode().Perm()&0o077 != 0 {
-		t.Errorf("permissions for %s = %o, want strict (no group/other)", path, info.Mode().Perm())
-	}
+	require.NoError(t, err, "stat")
+	assert.Zero(t, info.Mode().Perm()&0o077, "permissions for %s should be strict", path)
 }
 
 func TestOpenJobLog(t *testing.T) {
 	t.Run("creates_and_writes", func(t *testing.T) {
+		assert := assert.New(t)
+		require := require.New(t)
+
 		setupTestEnv(t)
 
 		f := openJobLog(99)
-		if f == nil {
-			t.Fatal("openJobLog returned nil")
-		}
+		require.NotNil(f, "openJobLog returned nil")
 		defer f.Close()
 
 		// Write some data and verify it lands on disk
 		_, err := f.WriteString("hello\n")
-		if err != nil {
-			t.Fatalf("write: %v", err)
-		}
+		require.NoError(err, "write")
 		f.Close()
 
 		data, err := os.ReadFile(JobLogPath(99))
-		if err != nil {
-			t.Fatalf("read: %v", err)
-		}
-		if string(data) != "hello\n" {
-			t.Errorf("file contents = %q, want %q", data, "hello\n")
-		}
+		require.NoError(err, "read")
+		assert.Equal("hello\n", string(data))
 	})
 
 	t.Run("strict_permissions", func(t *testing.T) {
 		setupTestEnv(t)
 		f := openJobLog(99)
-		if f == nil {
-			t.Fatal("openJobLog returned nil")
-		}
+		require.NotNil(t, f, "openJobLog returned nil")
 		f.Close()
 
 		assertStrictPerms(t, JobLogPath(99))
@@ -83,6 +71,8 @@ func TestOpenJobLog(t *testing.T) {
 }
 
 func TestOpenJobLog_TightensPermissivePerms(t *testing.T) {
+	require := require.New(t)
+
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX permissions not applicable on Windows")
 	}
@@ -91,18 +81,12 @@ func TestOpenJobLog_TightensPermissivePerms(t *testing.T) {
 	// Pre-create dir and file with permissive modes, simulating
 	// an install upgraded from a version that used 0755/0644.
 	dir := JobLogDir()
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(os.MkdirAll(dir, 0755))
 	path := JobLogPath(500)
-	if err := os.WriteFile(path, []byte("old"), 0644); err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(os.WriteFile(path, []byte("old"), 0644))
 
 	f := openJobLog(500)
-	if f == nil {
-		t.Fatal("openJobLog returned nil")
-	}
+	require.NotNil(f, "openJobLog returned nil")
 	f.Close()
 
 	assertStrictPerms(t, dir)
@@ -111,22 +95,19 @@ func TestOpenJobLog_TightensPermissivePerms(t *testing.T) {
 
 func createLogFile(t *testing.T, path, content string, mtime time.Time) {
 	t.Helper()
-	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chtimes(path, mtime, mtime); err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, os.WriteFile(path, []byte(content), 0644))
+	require.NoError(t, os.Chtimes(path, mtime, mtime))
 }
 
 func TestCleanJobLogs(t *testing.T) {
 	t.Run("removes_old_keeps_new", func(t *testing.T) {
+		assert := assert.New(t)
+		require := require.New(t)
+
 		setupTestEnv(t)
 
 		dir := JobLogDir()
-		if err := os.MkdirAll(dir, 0755); err != nil {
-			t.Fatal(err)
-		}
+		require.NoError(os.MkdirAll(dir, 0755))
 
 		// Create an "old" log file by writing and then back-dating its mtime
 		oldPath := filepath.Join(dir, "1.log")
@@ -141,33 +122,26 @@ func TestCleanJobLogs(t *testing.T) {
 		createLogFile(t, txtPath, "ignore", time.Now())
 
 		removed := CleanJobLogs(7 * 24 * time.Hour)
-		if removed != 1 {
-			t.Errorf("CleanJobLogs removed %d files, want 1", removed)
-		}
+		assert.Equal(1, removed)
 
 		// Old file should be gone
-		if _, err := os.Stat(oldPath); !os.IsNotExist(err) {
-			t.Error("old log file should be removed")
-		}
+		_, err := os.Stat(oldPath)
+		assert.True(os.IsNotExist(err), "old log file should be removed")
 
 		// New file should remain
-		if _, err := os.Stat(newPath); err != nil {
-			t.Error("new log file should still exist")
-		}
+		_, err = os.Stat(newPath)
+		require.NoError(err, "new log file should still exist")
 
 		// Non-log file should remain
-		if _, err := os.Stat(txtPath); err != nil {
-			t.Error("non-log file should still exist")
-		}
+		_, err = os.Stat(txtPath)
+		require.NoError(err, "non-log file should still exist")
 	})
 
 	t.Run("no_dir", func(t *testing.T) {
 		setupTestEnv(t)
 		// No logs/jobs directory exists — should return 0 without error
 		removed := CleanJobLogs(7 * 24 * time.Hour)
-		if removed != 0 {
-			t.Errorf("CleanJobLogs on missing dir = %d, want 0", removed)
-		}
+		assert.Zero(t, removed)
 	})
 }
 
@@ -179,26 +153,38 @@ func TestJobLogWriter(t *testing.T) {
 
 		n, err := w.Write([]byte("line 1\n"))
 		if err != nil {
-			t.Fatalf("Write error: %v", err)
+			require.Condition(t, func() bool {
+				return false
+			}, "Write error: %v", err)
 		}
 		if n != 7 {
-			t.Errorf("Write returned %d, want 7", n)
+			assert.Condition(t, func() bool {
+				return false
+			}, "Write returned %d, want 7", n)
 		}
 
 		n, err = w.Write([]byte("line 2\n"))
 		if err != nil {
-			t.Fatalf("Write error: %v", err)
+			require.Condition(t, func() bool {
+				return false
+			}, "Write error: %v", err)
 		}
 		if n != 7 {
-			t.Errorf("Write returned %d, want 7", n)
+			assert.Condition(t, func() bool {
+				return false
+			}, "Write returned %d, want 7", n)
 		}
 
 		if err := w.Close(); err != nil {
-			t.Fatalf("Close: %v", err)
+			require.Condition(t, func() bool {
+				return false
+			}, "Close: %v", err)
 		}
 		data, _ := os.ReadFile(JobLogPath(200))
 		if string(data) != "line 1\nline 2\n" {
-			t.Errorf("contents = %q", data)
+			assert.Condition(t, func() bool {
+				return false
+			}, "contents = %q", data)
 		}
 	})
 
@@ -212,34 +198,50 @@ func TestJobLogWriter(t *testing.T) {
 
 		logsDir := filepath.Join(filepath.Dir(JobLogDir()))
 		if err := os.MkdirAll(logsDir, 0700); err != nil {
-			t.Fatalf("MkdirAll: %v", err)
+			require.Condition(t, func() bool {
+				return false
+			}, "MkdirAll: %v", err)
 		}
 		if err := os.WriteFile(JobLogDir(), []byte("blocked"), 0600); err != nil {
-			t.Fatalf("WriteFile: %v", err)
+			require.Condition(t, func() bool {
+				return false
+			}, "WriteFile: %v", err)
 		}
 
 		w := newJobLogWriter(201)
 		if _, err := w.Write([]byte("line 1\n")); err != nil {
-			t.Fatalf("Write while blocked: %v", err)
+			require.Condition(t, func() bool {
+				return false
+			}, "Write while blocked: %v", err)
 		}
 
 		if err := os.Remove(JobLogDir()); err != nil {
-			t.Fatalf("Remove blocker: %v", err)
+			require.Condition(t, func() bool {
+				return false
+			}, "Remove blocker: %v", err)
 		}
 
 		if _, err := w.Write([]byte("line 2\n")); err != nil {
-			t.Fatalf("Write after recovery: %v", err)
+			require.Condition(t, func() bool {
+				return false
+			}, "Write after recovery: %v", err)
 		}
 		if err := w.Close(); err != nil {
-			t.Fatalf("Close: %v", err)
+			require.Condition(t, func() bool {
+				return false
+			}, "Close: %v", err)
 		}
 
 		data, err := os.ReadFile(JobLogPath(201))
 		if err != nil {
-			t.Fatalf("ReadFile: %v", err)
+			require.Condition(t, func() bool {
+				return false
+			}, "ReadFile: %v", err)
 		}
 		if string(data) != "line 1\nline 2\n" {
-			t.Errorf("contents = %q, want %q", data, "line 1\nline 2\n")
+			assert.Condition(t, func() bool {
+				return false
+			}, "contents = %q, want %q", data, "line 1\nline 2\n")
 		}
 	})
 
@@ -253,30 +255,44 @@ func TestJobLogWriter(t *testing.T) {
 
 		logsDir := filepath.Join(filepath.Dir(JobLogDir()))
 		if err := os.MkdirAll(logsDir, 0700); err != nil {
-			t.Fatalf("MkdirAll: %v", err)
+			require.Condition(t, func() bool {
+				return false
+			}, "MkdirAll: %v", err)
 		}
 		if err := os.WriteFile(JobLogDir(), []byte("blocked"), 0600); err != nil {
-			t.Fatalf("WriteFile: %v", err)
+			require.Condition(t, func() bool {
+				return false
+			}, "WriteFile: %v", err)
 		}
 
 		w := newJobLogWriter(202)
 		if _, err := w.Write([]byte("buffered\n")); err != nil {
-			t.Fatalf("Write while blocked: %v", err)
+			require.Condition(t, func() bool {
+				return false
+			}, "Write while blocked: %v", err)
 		}
 
 		if err := os.Remove(JobLogDir()); err != nil {
-			t.Fatalf("Remove blocker: %v", err)
+			require.Condition(t, func() bool {
+				return false
+			}, "Remove blocker: %v", err)
 		}
 		if err := w.Close(); err != nil {
-			t.Fatalf("Close: %v", err)
+			require.Condition(t, func() bool {
+				return false
+			}, "Close: %v", err)
 		}
 
 		data, err := os.ReadFile(JobLogPath(202))
 		if err != nil {
-			t.Fatalf("ReadFile: %v", err)
+			require.Condition(t, func() bool {
+				return false
+			}, "ReadFile: %v", err)
 		}
 		if string(data) != "buffered\n" {
-			t.Errorf("contents = %q, want %q", data, "buffered\n")
+			assert.Condition(t, func() bool {
+				return false
+			}, "contents = %q, want %q", data, "buffered\n")
 		}
 	})
 
@@ -287,18 +303,26 @@ func TestJobLogWriter(t *testing.T) {
 
 		mw := io.MultiWriter(w, failingWriter{})
 		if _, err := mw.Write([]byte("persist me\n")); err == nil {
-			t.Fatal("expected companion writer failure")
+			require.Condition(t, func() bool {
+				return false
+			}, "expected companion writer failure")
 		}
 		if err := w.Close(); err != nil {
-			t.Fatalf("Close: %v", err)
+			require.Condition(t, func() bool {
+				return false
+			}, "Close: %v", err)
 		}
 
 		data, err := os.ReadFile(JobLogPath(203))
 		if err != nil {
-			t.Fatalf("ReadFile: %v", err)
+			require.Condition(t, func() bool {
+				return false
+			}, "ReadFile: %v", err)
 		}
 		if string(data) != "persist me\n" {
-			t.Errorf("contents = %q, want %q", data, "persist me\n")
+			assert.Condition(t, func() bool {
+				return false
+			}, "contents = %q, want %q", data, "persist me\n")
 		}
 	})
 
@@ -307,21 +331,31 @@ func TestJobLogWriter(t *testing.T) {
 		w := &jobLogWriter{jobID: 204, f: pw}
 
 		if _, err := w.Write([]byte("abcdef")); err != nil {
-			t.Fatalf("Write: %v", err)
+			require.Condition(t, func() bool {
+				return false
+			}, "Write: %v", err)
 		}
 		if got := pw.String(); got != "abc" {
-			t.Fatalf("written prefix = %q, want %q", got, "abc")
+			require.Condition(t, func() bool {
+				return false
+			}, "written prefix = %q, want %q", got, "abc")
 		}
 		if got := w.buf.String(); got != "def" {
-			t.Fatalf("buffered suffix = %q, want %q", got, "def")
+			require.Condition(t, func() bool {
+				return false
+			}, "buffered suffix = %q, want %q", got, "def")
 		}
 
 		w.f = pw
 		if err := w.Close(); err != nil {
-			t.Fatalf("Close: %v", err)
+			require.Condition(t, func() bool {
+				return false
+			}, "Close: %v", err)
 		}
 		if got := pw.String(); got != "abcdef" {
-			t.Fatalf("final content = %q, want %q", got, "abcdef")
+			require.Condition(t, func() bool {
+				return false
+			}, "final content = %q, want %q", got, "abcdef")
 		}
 	})
 
@@ -332,20 +366,30 @@ func TestJobLogWriter(t *testing.T) {
 
 		err := w.flushBufferedLocked()
 		if err == nil {
-			t.Fatal("expected flush error")
+			require.Condition(t, func() bool {
+				return false
+			}, "expected flush error")
 		}
 		if got := pw.String(); got != "abc" {
-			t.Fatalf("written prefix = %q, want %q", got, "abc")
+			require.Condition(t, func() bool {
+				return false
+			}, "written prefix = %q, want %q", got, "abc")
 		}
 		if got := w.buf.String(); got != "def" {
-			t.Fatalf("remaining buffer = %q, want %q", got, "def")
+			require.Condition(t, func() bool {
+				return false
+			}, "remaining buffer = %q, want %q", got, "def")
 		}
 
 		if err := w.flushBufferedLocked(); err != nil {
-			t.Fatalf("second flush: %v", err)
+			require.Condition(t, func() bool {
+				return false
+			}, "second flush: %v", err)
 		}
 		if got := pw.String(); got != "abcdef" {
-			t.Fatalf("final content = %q, want %q", got, "abcdef")
+			require.Condition(t, func() bool {
+				return false
+			}, "final content = %q, want %q", got, "abcdef")
 		}
 	})
 
@@ -357,23 +401,35 @@ func TestJobLogWriter(t *testing.T) {
 
 		err := w.flushBufferedLocked()
 		if err == nil {
-			t.Fatal("expected flush error")
+			require.Condition(t, func() bool {
+				return false
+			}, "expected flush error")
 		}
 		if got := pw.String(); got != "NOT" {
-			t.Fatalf("written prefix = %q, want %q", got, "NOT")
+			require.Condition(t, func() bool {
+				return false
+			}, "written prefix = %q, want %q", got, "NOT")
 		}
 		if got := w.notice.String(); got != "ICE" {
-			t.Fatalf("remaining notice = %q, want %q", got, "ICE")
+			require.Condition(t, func() bool {
+				return false
+			}, "remaining notice = %q, want %q", got, "ICE")
 		}
 		if got := w.buf.String(); got != "tail" {
-			t.Fatalf("buffer should remain queued until notice completes, got %q", got)
+			require.Condition(t, func() bool {
+				return false
+			}, "buffer should remain queued until notice completes, got %q", got)
 		}
 
 		if err := w.flushBufferedLocked(); err != nil {
-			t.Fatalf("second flush: %v", err)
+			require.Condition(t, func() bool {
+				return false
+			}, "second flush: %v", err)
 		}
 		if got := pw.String(); got != "NOTICEtail" {
-			t.Fatalf("final content = %q, want %q", got, "NOTICEtail")
+			require.Condition(t, func() bool {
+				return false
+			}, "final content = %q, want %q", got, "NOTICEtail")
 		}
 	})
 }
@@ -412,24 +468,32 @@ func TestReadJobLog(t *testing.T) {
 	t.Run("existing", func(t *testing.T) {
 		f := openJobLog(300)
 		if f == nil {
-			t.Fatal("openJobLog returned nil")
+			require.Condition(t, func() bool {
+				return false
+			}, "openJobLog returned nil")
 		}
 		_, _ = f.WriteString("log content")
 		f.Close()
 
 		data, err := ReadJobLog(300)
 		if err != nil {
-			t.Fatalf("ReadJobLog: %v", err)
+			require.Condition(t, func() bool {
+				return false
+			}, "ReadJobLog: %v", err)
 		}
 		if string(data) != "log content" {
-			t.Errorf("contents = %q, want %q", data, "log content")
+			assert.Condition(t, func() bool {
+				return false
+			}, "contents = %q, want %q", data, "log content")
 		}
 	})
 
 	t.Run("missing", func(t *testing.T) {
 		_, err := ReadJobLog(999)
 		if err == nil {
-			t.Error("ReadJobLog should error for missing file")
+			assert.Condition(t, func() bool {
+				return false
+			}, "ReadJobLog should error for missing file")
 		}
 	})
 }
@@ -438,17 +502,23 @@ func TestJobLogExists(t *testing.T) {
 	setupTestEnv(t)
 
 	if JobLogExists(400) {
-		t.Error("should not exist before creation")
+		assert.Condition(t, func() bool {
+			return false
+		}, "should not exist before creation")
 	}
 
 	f := openJobLog(400)
 	if f == nil {
-		t.Fatal("openJobLog returned nil")
+		require.Condition(t, func() bool {
+			return false
+		}, "openJobLog returned nil")
 	}
 	f.Close()
 
 	if !JobLogExists(400) {
-		t.Error("should exist after creation")
+		assert.Condition(t, func() bool {
+			return false
+		}, "should exist after creation")
 	}
 }
 
@@ -471,7 +541,9 @@ func TestParseJobIDFromLogName(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			id, ok := ParseJobIDFromLogName(tt.input)
 			if id != tt.wantID || ok != tt.wantOK {
-				t.Errorf("ParseJobIDFromLogName(%q) = (%d, %v), want (%d, %v)",
+				assert.Condition(t, func() bool {
+					return false
+				}, "ParseJobIDFromLogName(%q) = (%d, %v), want (%d, %v)",
 					tt.input, id, ok, tt.wantID, tt.wantOK)
 			}
 		})

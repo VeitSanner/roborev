@@ -2,6 +2,11 @@ package daemon
 
 import (
 	"fmt"
+
+	"github.com/roborev-dev/roborev/internal/storage"
+	"github.com/roborev-dev/roborev/internal/testutil"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -9,9 +14,6 @@ import (
 	"strconv"
 	"strings"
 	"testing"
-
-	"github.com/roborev-dev/roborev/internal/storage"
-	"github.com/roborev-dev/roborev/internal/testutil"
 )
 
 // TestHandleJobOutput_InvalidJobID tests that invalid job_id returns 400.
@@ -24,7 +26,9 @@ func TestHandleJobOutput_InvalidJobID(t *testing.T) {
 	server.handleJobOutput(w, req)
 
 	if w.Code != http.StatusBadRequest {
-		t.Errorf("Expected status 400, got %d: %s", w.Code, w.Body.String())
+		assert.Condition(t, func() bool {
+			return false
+		}, "Expected status 400, got %d: %s", w.Code, w.Body.String())
 	}
 }
 
@@ -38,7 +42,9 @@ func TestHandleJobOutput_NonExistentJob(t *testing.T) {
 	server.handleJobOutput(w, req)
 
 	if w.Code != http.StatusNotFound {
-		t.Errorf("Expected status 404, got %d: %s", w.Code, w.Body.String())
+		assert.Condition(t, func() bool {
+			return false
+		}, "Expected status 404, got %d: %s", w.Code, w.Body.String())
 	}
 }
 
@@ -56,7 +62,9 @@ func TestHandleJobOutput_PollingRunningJob(t *testing.T) {
 	server.handleJobOutput(w, req)
 
 	if w.Code != http.StatusOK {
-		t.Fatalf("Expected status 200, got %d: %s", w.Code, w.Body.String())
+		require.Condition(t, func() bool {
+			return false
+		}, "Expected status 200, got %d: %s", w.Code, w.Body.String())
 	}
 
 	var resp struct {
@@ -72,13 +80,19 @@ func TestHandleJobOutput_PollingRunningJob(t *testing.T) {
 	testutil.DecodeJSON(t, w, &resp)
 
 	if resp.JobID != job.ID {
-		t.Errorf("Expected job_id %d, got %d", job.ID, resp.JobID)
+		assert.Condition(t, func() bool {
+			return false
+		}, "Expected job_id %d, got %d", job.ID, resp.JobID)
 	}
 	if resp.Status != "running" {
-		t.Errorf("Expected status 'running', got %q", resp.Status)
+		assert.Condition(t, func() bool {
+			return false
+		}, "Expected status 'running', got %q", resp.Status)
 	}
 	if !resp.HasMore {
-		t.Error("Expected has_more=true for running job")
+		assert.Condition(t, func() bool {
+			return false
+		}, "Expected has_more=true for running job")
 	}
 }
 
@@ -96,7 +110,9 @@ func TestHandleJobOutput_PollingCompletedJob(t *testing.T) {
 	server.handleJobOutput(w, req)
 
 	if w.Code != http.StatusOK {
-		t.Fatalf("Expected status 200, got %d: %s", w.Code, w.Body.String())
+		require.Condition(t, func() bool {
+			return false
+		}, "Expected status 200, got %d: %s", w.Code, w.Body.String())
 	}
 
 	var resp struct {
@@ -107,10 +123,14 @@ func TestHandleJobOutput_PollingCompletedJob(t *testing.T) {
 	testutil.DecodeJSON(t, w, &resp)
 
 	if resp.Status != "done" {
-		t.Errorf("Expected status 'done', got %q", resp.Status)
+		assert.Condition(t, func() bool {
+			return false
+		}, "Expected status 'done', got %q", resp.Status)
 	}
 	if resp.HasMore {
-		t.Error("Expected has_more=false for completed job")
+		assert.Condition(t, func() bool {
+			return false
+		}, "Expected has_more=false for completed job")
 	}
 }
 
@@ -130,7 +150,9 @@ func TestHandleJobOutput_StreamingCompletedJob(t *testing.T) {
 
 	// Should return immediately with complete message, not hang
 	if w.Code != http.StatusOK {
-		t.Fatalf("Expected status 200, got %d: %s", w.Code, w.Body.String())
+		require.Condition(t, func() bool {
+			return false
+		}, "Expected status 200, got %d: %s", w.Code, w.Body.String())
 	}
 
 	var resp struct {
@@ -140,10 +162,14 @@ func TestHandleJobOutput_StreamingCompletedJob(t *testing.T) {
 	testutil.DecodeJSON(t, w, &resp)
 
 	if resp.Type != "complete" {
-		t.Errorf("Expected type 'complete', got %q", resp.Type)
+		assert.Condition(t, func() bool {
+			return false
+		}, "Expected type 'complete', got %q", resp.Type)
 	}
 	if resp.Status != "done" {
-		t.Errorf("Expected status 'done', got %q", resp.Status)
+		assert.Condition(t, func() bool {
+			return false
+		}, "Expected status 'done', got %q", resp.Status)
 	}
 }
 
@@ -156,7 +182,9 @@ func TestHandleJobOutput_MissingJobID(t *testing.T) {
 	server.handleJobOutput(w, req)
 
 	if w.Code != http.StatusBadRequest {
-		t.Errorf("Expected status 400, got %d: %s", w.Code, w.Body.String())
+		assert.Condition(t, func() bool {
+			return false
+		}, "Expected status 400, got %d: %s", w.Code, w.Body.String())
 	}
 }
 
@@ -172,7 +200,9 @@ func TestHandleJobLog(t *testing.T) {
 	// Create a repo and a job
 	repo, err := db.GetOrCreateRepo(filepath.Join(tmpDir, "testrepo"))
 	if err != nil {
-		t.Fatalf("GetOrCreateRepo: %v", err)
+		require.Condition(t, func() bool {
+			return false
+		}, "GetOrCreateRepo: %v", err)
 	}
 	job, err := db.EnqueueJob(storage.EnqueueOpts{
 		RepoID: repo.ID,
@@ -180,7 +210,9 @@ func TestHandleJobLog(t *testing.T) {
 		Agent:  "test",
 	})
 	if err != nil {
-		t.Fatalf("EnqueueJob: %v", err)
+		require.Condition(t, func() bool {
+			return false
+		}, "EnqueueJob: %v", err)
 	}
 
 	t.Run("missing job_id returns 400", func(t *testing.T) {
@@ -188,7 +220,9 @@ func TestHandleJobLog(t *testing.T) {
 		w := httptest.NewRecorder()
 		server.handleJobLog(w, req)
 		if w.Code != http.StatusBadRequest {
-			t.Errorf("expected 400, got %d", w.Code)
+			assert.Condition(t, func() bool {
+				return false
+			}, "expected 400, got %d", w.Code)
 		}
 	})
 
@@ -199,7 +233,9 @@ func TestHandleJobLog(t *testing.T) {
 		w := httptest.NewRecorder()
 		server.handleJobLog(w, req)
 		if w.Code != http.StatusNotFound {
-			t.Errorf("expected 404, got %d", w.Code)
+			assert.Condition(t, func() bool {
+				return false
+			}, "expected 404, got %d", w.Code)
 		}
 	})
 
@@ -212,7 +248,9 @@ func TestHandleJobLog(t *testing.T) {
 		w := httptest.NewRecorder()
 		server.handleJobLog(w, req)
 		if w.Code != http.StatusNotFound {
-			t.Errorf("expected 404, got %d: %s", w.Code, w.Body.String())
+			assert.Condition(t, func() bool {
+				return false
+			}, "expected 404, got %d: %s", w.Code, w.Body.String())
 		}
 	})
 
@@ -220,13 +258,17 @@ func TestHandleJobLog(t *testing.T) {
 		// Create a log file
 		logDir := JobLogDir()
 		if err := os.MkdirAll(logDir, 0755); err != nil {
-			t.Fatalf("MkdirAll: %v", err)
+			require.Condition(t, func() bool {
+				return false
+			}, "MkdirAll: %v", err)
 		}
 		logContent := `{"type":"assistant","message":{"content":[{"type":"text","text":"hello"}]}}` + "\n"
 		if err := os.WriteFile(
 			JobLogPath(job.ID), []byte(logContent), 0644,
 		); err != nil {
-			t.Fatalf("WriteFile: %v", err)
+			require.Condition(t, func() bool {
+				return false
+			}, "WriteFile: %v", err)
 		}
 
 		req := httptest.NewRequest(
@@ -238,16 +280,24 @@ func TestHandleJobLog(t *testing.T) {
 		server.handleJobLog(w, req)
 
 		if w.Code != http.StatusOK {
-			t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+			require.Condition(t, func() bool {
+				return false
+			}, "expected 200, got %d: %s", w.Code, w.Body.String())
 		}
 		if ct := w.Header().Get("Content-Type"); ct != "application/x-ndjson" {
-			t.Errorf("expected Content-Type application/x-ndjson, got %q", ct)
+			assert.Condition(t, func() bool {
+				return false
+			}, "expected Content-Type application/x-ndjson, got %q", ct)
 		}
 		if js := w.Header().Get("X-Job-Status"); js != "queued" {
-			t.Errorf("expected X-Job-Status queued, got %q", js)
+			assert.Condition(t, func() bool {
+				return false
+			}, "expected X-Job-Status queued, got %q", js)
 		}
 		if w.Body.String() != logContent {
-			t.Errorf("expected log content %q, got %q", logContent, w.Body.String())
+			assert.Condition(t, func() bool {
+				return false
+			}, "expected log content %q, got %q", logContent, w.Body.String())
 		}
 	})
 
@@ -255,9 +305,13 @@ func TestHandleJobLog(t *testing.T) {
 		// Claim the existing queued job to move it to "running"
 		claimed, err := db.ClaimJob("worker-test")
 		if err != nil {
-			t.Fatalf("ClaimJob: %v", err)
+			require.Condition(t, func() bool {
+				return false
+
+				// Remove any log file to simulate startup race
+			}, "ClaimJob: %v", err)
 		}
-		// Remove any log file to simulate startup race
+
 		os.Remove(JobLogPath(claimed.ID))
 
 		req := httptest.NewRequest(
@@ -269,13 +323,19 @@ func TestHandleJobLog(t *testing.T) {
 		server.handleJobLog(w, req)
 
 		if w.Code != http.StatusOK {
-			t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+			require.Condition(t, func() bool {
+				return false
+			}, "expected 200, got %d: %s", w.Code, w.Body.String())
 		}
 		if js := w.Header().Get("X-Job-Status"); js != "running" {
-			t.Errorf("expected X-Job-Status running, got %q", js)
+			assert.Condition(t, func() bool {
+				return false
+			}, "expected X-Job-Status running, got %q", js)
 		}
 		if w.Body.Len() != 0 {
-			t.Errorf("expected empty body, got %q", w.Body.String())
+			assert.Condition(t, func() bool {
+				return false
+			}, "expected empty body, got %q", w.Body.String())
 		}
 	})
 
@@ -288,7 +348,9 @@ func TestHandleJobLog(t *testing.T) {
 		w := httptest.NewRecorder()
 		server.handleJobLog(w, req)
 		if w.Code != http.StatusMethodNotAllowed {
-			t.Errorf("expected 405, got %d", w.Code)
+			assert.Condition(t, func() bool {
+				return false
+			}, "expected 405, got %d", w.Code)
 		}
 	})
 }
@@ -301,7 +363,9 @@ func TestHandleJobLogOffset(t *testing.T) {
 		filepath.Join(tmpDir, "testrepo"),
 	)
 	if err != nil {
-		t.Fatalf("GetOrCreateRepo: %v", err)
+		require.Condition(t, func() bool {
+			return false
+		}, "GetOrCreateRepo: %v", err)
 	}
 	job, err := db.EnqueueJob(storage.EnqueueOpts{
 		RepoID: repo.ID,
@@ -309,13 +373,18 @@ func TestHandleJobLogOffset(t *testing.T) {
 		Agent:  "test",
 	})
 	if err != nil {
-		t.Fatalf("EnqueueJob: %v", err)
+		require.Condition(t, func() bool {
+			return false
+
+			// Create log file with two JSONL lines.
+		}, "EnqueueJob: %v", err)
 	}
 
-	// Create log file with two JSONL lines.
 	logDir := JobLogDir()
 	if err := os.MkdirAll(logDir, 0755); err != nil {
-		t.Fatalf("MkdirAll: %v", err)
+		require.Condition(t, func() bool {
+			return false
+		}, "MkdirAll: %v", err)
 	}
 	line1 := `{"type":"assistant","message":{"content":[{"type":"text","text":"first"}]}}` + "\n"
 	line2 := `{"type":"assistant","message":{"content":[{"type":"text","text":"second"}]}}` + "\n"
@@ -323,7 +392,9 @@ func TestHandleJobLogOffset(t *testing.T) {
 	if err := os.WriteFile(
 		JobLogPath(job.ID), []byte(logContent), 0644,
 	); err != nil {
-		t.Fatalf("WriteFile: %v", err)
+		require.Condition(t, func() bool {
+			return false
+		}, "WriteFile: %v", err)
 	}
 
 	t.Run("offset=0 returns full content", func(t *testing.T) {
@@ -338,26 +409,32 @@ func TestHandleJobLogOffset(t *testing.T) {
 		server.handleJobLog(w, req)
 
 		if w.Code != http.StatusOK {
-			t.Fatalf("expected 200, got %d", w.Code)
+			require.Condition(t, func() bool {
+				return false
+			}, "expected 200, got %d", w.Code)
 		}
 		if w.Body.String() != logContent {
-			t.Errorf(
-				"expected full content, got %q",
-				w.Body.String(),
-			)
+			assert.Condition(t, func() bool {
+				return false
+			}, "expected full content, got %q",
+				w.Body.String())
+
 		}
 
 		// X-Log-Offset should equal file size.
 		offsetStr := w.Header().Get("X-Log-Offset")
 		offset, err := strconv.ParseInt(offsetStr, 10, 64)
 		if err != nil {
-			t.Fatalf("parse X-Log-Offset %q: %v", offsetStr, err)
+			require.Condition(t, func() bool {
+				return false
+			}, "parse X-Log-Offset %q: %v", offsetStr, err)
 		}
 		if offset != int64(len(logContent)) {
-			t.Errorf(
-				"X-Log-Offset = %d, want %d",
-				offset, len(logContent),
-			)
+			assert.Condition(t, func() bool {
+				return false
+			}, "X-Log-Offset = %d, want %d",
+				offset, len(logContent))
+
 		}
 	})
 
@@ -375,13 +452,16 @@ func TestHandleJobLogOffset(t *testing.T) {
 		server.handleJobLog(w, req)
 
 		if w.Code != http.StatusOK {
-			t.Fatalf("expected 200, got %d", w.Code)
+			require.Condition(t, func() bool {
+				return false
+			}, "expected 200, got %d", w.Code)
 		}
 		if w.Body.String() != line2 {
-			t.Errorf(
-				"expected second line only, got %q",
-				w.Body.String(),
-			)
+			assert.Condition(t, func() bool {
+				return false
+			}, "expected second line only, got %q",
+				w.Body.String())
+
 		}
 	})
 
@@ -399,13 +479,16 @@ func TestHandleJobLogOffset(t *testing.T) {
 		server.handleJobLog(w, req)
 
 		if w.Code != http.StatusOK {
-			t.Fatalf("expected 200, got %d", w.Code)
+			require.Condition(t, func() bool {
+				return false
+			}, "expected 200, got %d", w.Code)
 		}
 		if w.Body.Len() != 0 {
-			t.Errorf(
-				"expected empty body, got %q",
-				w.Body.String(),
-			)
+			assert.Condition(t, func() bool {
+				return false
+			}, "expected empty body, got %q",
+				w.Body.String())
+
 		}
 	})
 
@@ -421,7 +504,9 @@ func TestHandleJobLogOffset(t *testing.T) {
 		server.handleJobLog(w, req)
 
 		if w.Code != http.StatusBadRequest {
-			t.Errorf("expected 400, got %d", w.Code)
+			assert.Condition(t, func() bool {
+				return false
+			}, "expected 400, got %d", w.Code)
 		}
 	})
 
@@ -438,14 +523,17 @@ func TestHandleJobLogOffset(t *testing.T) {
 		server.handleJobLog(w, req)
 
 		if w.Code != http.StatusOK {
-			t.Fatalf("expected 200, got %d", w.Code)
+			require.Condition(t, func() bool {
+				return false
+			}, "expected 200, got %d", w.Code)
 		}
 		// Should return full content since offset was clamped.
 		if w.Body.String() != logContent {
-			t.Errorf(
-				"expected full content after clamp, got %q",
-				w.Body.String(),
-			)
+			assert.Condition(t, func() bool {
+				return false
+			}, "expected full content after clamp, got %q",
+				w.Body.String())
+
 		}
 	})
 
@@ -453,7 +541,9 @@ func TestHandleJobLogOffset(t *testing.T) {
 		// Claim the existing queued job first so the next
 		// ClaimJob picks up job2.
 		if _, err := db.ClaimJob("worker-drain"); err != nil {
-			t.Fatalf("ClaimJob (drain): %v", err)
+			require.Condition(t, func() bool {
+				return false
+			}, "ClaimJob (drain): %v", err)
 		}
 
 		// Create a new running job with a partial line at end.
@@ -463,13 +553,18 @@ func TestHandleJobLogOffset(t *testing.T) {
 			Agent:  "test",
 		})
 		if err != nil {
-			t.Fatalf("EnqueueJob: %v", err)
+			require.Condition(t, func() bool {
+				return false
+			}, "EnqueueJob: %v", err)
 		}
 		if _, err := db.ClaimJob("worker-test2"); err != nil {
-			t.Fatalf("ClaimJob: %v", err)
+			require.Condition(t, func() bool {
+				return false
+
+				// Write a complete line + partial line.
+			}, "ClaimJob: %v", err)
 		}
 
-		// Write a complete line + partial line.
 		completeLine := `{"type":"assistant","message":{"content":[{"type":"text","text":"done"}]}}` + "\n"
 		partialLine := `{"type":"assistant","message":{"content":`
 		if err := os.WriteFile(
@@ -477,7 +572,9 @@ func TestHandleJobLogOffset(t *testing.T) {
 			[]byte(completeLine+partialLine),
 			0644,
 		); err != nil {
-			t.Fatalf("WriteFile: %v", err)
+			require.Condition(t, func() bool {
+				return false
+			}, "WriteFile: %v", err)
 		}
 
 		req := httptest.NewRequest(
@@ -491,29 +588,35 @@ func TestHandleJobLogOffset(t *testing.T) {
 		server.handleJobLog(w, req)
 
 		if w.Code != http.StatusOK {
-			t.Fatalf("expected 200, got %d", w.Code)
+			require.Condition(t, func() bool {
+				return false
+			}, "expected 200, got %d", w.Code)
 		}
 
 		// Should only return up to the newline, not the partial.
 		body := w.Body.String()
 		if body != completeLine {
-			t.Errorf(
-				"expected only complete line, got %q",
-				body,
-			)
+			assert.Condition(t, func() bool {
+				return false
+			}, "expected only complete line, got %q",
+				body)
+
 		}
 
 		// X-Log-Offset should point past the newline.
 		offsetStr := w.Header().Get("X-Log-Offset")
 		offset, err := strconv.ParseInt(offsetStr, 10, 64)
 		if err != nil {
-			t.Fatalf("parse X-Log-Offset: %v", err)
+			require.Condition(t, func() bool {
+				return false
+			}, "parse X-Log-Offset: %v", err)
 		}
 		if offset != int64(len(completeLine)) {
-			t.Errorf(
-				"X-Log-Offset = %d, want %d",
-				offset, len(completeLine),
-			)
+			assert.Condition(t, func() bool {
+				return false
+			}, "X-Log-Offset = %d, want %d",
+				offset, len(completeLine))
+
 		}
 	})
 }
@@ -522,33 +625,31 @@ func TestJobLogSafeEnd(t *testing.T) {
 	t.Run("empty file", func(t *testing.T) {
 		f := writeTempFile(t, []byte{})
 		if got := jobLogSafeEnd(f, 0); got != 0 {
-			t.Errorf("expected 0, got %d", got)
+			assert.Condition(t, func() bool {
+				return false
+			}, "expected 0, got %d", got)
 		}
 	})
 
 	t.Run("ends with newline", func(t *testing.T) {
 		data := []byte("line1\nline2\n")
 		f := writeTempFile(t, data)
-		if got := jobLogSafeEnd(f, int64(len(data))); got != int64(len(data)) {
-			t.Errorf("expected %d, got %d", len(data), got)
-		}
+		got := jobLogSafeEnd(f, int64(len(data)))
+		assert.Equal(t, int64(len(data)), got, "full data length should be returned when data ends with newline")
 	})
 
 	t.Run("partial line at end", func(t *testing.T) {
 		data := []byte("line1\npartial")
 		f := writeTempFile(t, data)
 		got := jobLogSafeEnd(f, int64(len(data)))
-		if got != 6 { // "line1\n" is 6 bytes
-			t.Errorf("expected 6, got %d", got)
-		}
+		assert.Equal(t, int64(6), got, "\"line1\\n\" should return index 6")
 	})
 
 	t.Run("no newlines at all", func(t *testing.T) {
 		data := []byte("no-newlines-here")
 		f := writeTempFile(t, data)
-		if got := jobLogSafeEnd(f, int64(len(data))); got != 0 {
-			t.Errorf("expected 0, got %d", got)
-		}
+		got := jobLogSafeEnd(f, int64(len(data)))
+		assert.Equal(t, int64(0), got, "files without newlines should return 0")
 	})
 
 	t.Run("large partial beyond 64KB", func(t *testing.T) {
@@ -560,9 +661,7 @@ func TestJobLogSafeEnd(t *testing.T) {
 		f := writeTempFile(t, data)
 		got := jobLogSafeEnd(f, int64(len(data)))
 		want := int64(len(completeLine))
-		if got != want {
-			t.Errorf("expected %d, got %d", want, got)
-		}
+		assert.Equal(t, want, got, "partial chunk should align at the end of complete line")
 	})
 }
 
@@ -570,11 +669,15 @@ func writeTempFile(t *testing.T, data []byte) *os.File {
 	t.Helper()
 	f, err := os.CreateTemp(t.TempDir(), "logtest-*")
 	if err != nil {
-		t.Fatalf("CreateTemp: %v", err)
+		require.Condition(t, func() bool {
+			return false
+		}, "CreateTemp: %v", err)
 	}
 	t.Cleanup(func() { f.Close() })
 	if _, err := f.Write(data); err != nil {
-		t.Fatalf("Write: %v", err)
+		require.Condition(t, func() bool {
+			return false
+		}, "Write: %v", err)
 	}
 	return f
 }

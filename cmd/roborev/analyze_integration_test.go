@@ -6,13 +6,14 @@ import (
 	"context"
 	"net/http"
 	"regexp"
-	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/roborev-dev/roborev/internal/prompt/analyze"
 	"github.com/roborev-dev/roborev/internal/storage"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestWaitForAnalysisJob(t *testing.T) {
@@ -97,24 +98,14 @@ func TestWaitForAnalysisJob(t *testing.T) {
 			review, err := waitForAnalysisJob(ctx, ts.URL, testJobID)
 
 			if tt.wantErr {
-				if err == nil {
-					t.Fatal("expected error, got nil")
-				}
-				if !strings.Contains(err.Error(), tt.wantErrMsg) {
-					t.Errorf("error %q should contain %q", err.Error(), tt.wantErrMsg)
-				}
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.wantErrMsg)
 				return
 			}
 
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if review == nil {
-				t.Fatal("expected review, got nil")
-			}
-			if review.Output != tt.wantReview {
-				t.Errorf("got review %q, want %q", review.Output, tt.wantReview)
-			}
+			require.NoError(t, err)
+			require.NotNil(t, review, "expected review, got nil")
+			assert.Equal(t, tt.wantReview, review.Output)
 		})
 	}
 }
@@ -142,27 +133,15 @@ func TestRunAnalyzeAndFix_Integration(t *testing.T) {
 	}
 
 	err := runAnalyzeAndFix(cmd, ts.URL, repo.Dir, 99, analysisType, opts)
-	if err != nil {
-		t.Fatalf("runAnalyzeAndFix failed: %v", err)
-	}
+	require.NoError(t, err, "runAnalyzeAndFix failed: %v")
 
 	// Verify the workflow was executed
-	if atomic.LoadInt32(&state.JobsCount) < 2 {
-		t.Error("should have polled for job status")
-	}
-	if atomic.LoadInt32(&state.ReviewCount) == 0 {
-		t.Error("should have fetched the review")
-	}
-	if atomic.LoadInt32(&state.CloseCount) == 0 {
-		t.Error("should have marked job as closed")
-	}
+	assert.GreaterOrEqual(t, atomic.LoadInt32(&state.JobsCount), int32(2))
+	assert.NotZero(t, atomic.LoadInt32(&state.ReviewCount))
+	assert.NotZero(t, atomic.LoadInt32(&state.CloseCount))
 
 	// Verify output contains analysis result
 	outputStr := output.String()
-	if !strings.Contains(outputStr, "CODE SMELLS") {
-		t.Error("output should contain analysis result")
-	}
-	if !regexp.MustCompile(`Analysis job \d+ closed`).MatchString(outputStr) {
-		t.Errorf("output should match 'Analysis job N closed', got: %s", outputStr)
-	}
+	assert.Contains(t, outputStr, "CODE SMELLS")
+	assert.Regexp(t, regexp.MustCompile(`Analysis job \d+ closed`), outputStr)
 }

@@ -4,12 +4,13 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/spf13/cobra"
 
 	"github.com/roborev-dev/roborev/internal/testutil"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // reviewHarness encapsulates a test git repo, cobra command, and output buffer.
@@ -35,9 +36,8 @@ func newReviewHarness(t *testing.T) *reviewHarness {
 func (h *reviewHarness) writeConfig(content string) {
 	h.t.Helper()
 	path := filepath.Join(h.Dir, ".roborev.toml")
-	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
-		h.t.Fatal(err)
-	}
+	err := os.WriteFile(path, []byte(content), 0644)
+	require.NoError(h.t, err)
 }
 
 // runCmd executes the command with the given arguments.
@@ -50,28 +50,22 @@ func (h *reviewHarness) runCmd(args ...string) error {
 // assertOutputContains checks if the output contains the expected string.
 func (h *reviewHarness) assertOutputContains(want string) {
 	h.t.Helper()
-	if got := h.Out.String(); !strings.Contains(got, want) {
-		h.t.Errorf("Output missing %q. Got:\n%s", want, got)
-	}
+	got := h.Out.String()
+	assert.Contains(h.t, got, want, "Output missing %q. Got:\n%s", want, got)
 }
 
 // assertOutputNotContains checks if the output does not contain the forbidden string.
 func (h *reviewHarness) assertOutputNotContains(want string) {
 	h.t.Helper()
-	if got := h.Out.String(); strings.Contains(got, want) {
-		h.t.Errorf("Output should not contain %q. Got:\n%s", want, got)
-	}
+	got := h.Out.String()
+	assert.NotContains(h.t, got, want, "Output should not contain %q. Got:\n%s", want, got)
 }
 
 // assertErrorContains checks if the error contains the expected string.
 func (h *reviewHarness) assertErrorContains(err error, want string) {
 	h.t.Helper()
-	if err == nil {
-		h.t.Fatal("Expected error, got nil")
-	}
-	if !strings.Contains(err.Error(), want) {
-		h.t.Errorf("Error missing %q. Got: %v", want, err)
-	}
+	require.Error(h.t, err, "Expected error containing %q", want)
+	assert.Contains(h.t, err.Error(), want, "Error missing %q. Got: %v", want, err)
 }
 
 // runOpts holds optional parameters for run, mapping to CLI flags.
@@ -120,9 +114,8 @@ func TestLocalReviewFlag(t *testing.T) {
 	h := newReviewHarness(t)
 	// Passing --help to cobra usually returns nil error but prints usage.
 
-	if err := h.runCmd("--local", "--help"); err != nil {
-		t.Fatalf("Expected no error, got: %v", err)
-	}
+	err := h.runCmd("--local", "--help")
+	require.NoError(t, err, "Expected no error, got: %v")
 
 	h.assertOutputContains("--local")
 	h.assertOutputContains("run review locally without daemon")
@@ -132,9 +125,7 @@ func TestLocalReviewRequiresAgent(t *testing.T) {
 	h := newReviewHarness(t)
 
 	err := h.run(runOpts{Agent: "test", Reasoning: "fast"})
-	if err != nil {
-		t.Fatalf("Expected no error with test agent, got: %v", err)
-	}
+	require.NoError(t, err, "Expected no error with test agent, got: %v")
 
 	h.assertOutputContains("Running test review")
 }
@@ -144,14 +135,12 @@ func TestLocalReviewWithDirtyDiff(t *testing.T) {
 
 	// Create a new file to make the repo dirty
 	newFile := filepath.Join(h.Dir, "newfile.go")
-	if err := os.WriteFile(newFile, []byte("package main\nfunc test() {}"), 0644); err != nil {
-		t.Fatal(err)
-	}
+	err := os.WriteFile(newFile, []byte("package main\nfunc test() {}"), 0644)
+	require.NoError(t, err)
 
-	err := h.run(runOpts{Dirty: true, Agent: "test", Reasoning: "fast"})
-	if err != nil {
-		t.Fatalf("Expected no error, got: %v", err)
-	}
+	err = h.run(runOpts{Dirty: true, Agent: "test", Reasoning: "fast"})
+	require.NoError(t, err, "Expected no error, got: %v")
+
 	// We don't check output for diff content because agent output is mocked.
 	h.assertOutputContains("Commit: dirty")
 }
@@ -161,9 +150,7 @@ func TestLocalReviewAgentResolution(t *testing.T) {
 	h.writeConfig(`agent = "test"`)
 
 	err := h.run(runOpts{Reasoning: "fast"})
-	if err != nil {
-		t.Fatalf("Expected no error, got: %v", err)
-	}
+	require.NoError(t, err, "Expected no error, got: %v")
 
 	h.assertOutputContains("Running test review")
 }
@@ -176,9 +163,7 @@ model = "test-model"
 `)
 
 	err := h.run(runOpts{Reasoning: "fast"})
-	if err != nil {
-		t.Fatalf("Expected no error, got: %v", err)
-	}
+	require.NoError(t, err, "Expected no error, got: %v")
 
 	h.assertOutputContains("model: test-model")
 }
@@ -220,8 +205,8 @@ func TestLocalReviewValidation(t *testing.T) {
 			err := h.run(tc.opts)
 			if tc.wantErr != "" {
 				h.assertErrorContains(err, tc.wantErr)
-			} else if err != nil {
-				t.Fatalf("Expected no error, got: %v", err)
+			} else {
+				require.NoError(t, err, "Expected no error, got: %v")
 			}
 			if tc.wantOutput != "" {
 				h.assertOutputContains(tc.wantOutput)
@@ -238,9 +223,7 @@ review_agent_fast = "test"
 `)
 
 	err := h.run(runOpts{Reasoning: "fast"})
-	if err != nil {
-		t.Fatalf("Expected no error, got: %v", err)
-	}
+	require.NoError(t, err, "Expected no error, got: %v")
 
 	h.assertOutputContains("Running test review")
 }
@@ -254,9 +237,7 @@ review_model_thorough = "thorough-model"
 `)
 
 	err := h.run(runOpts{})
-	if err != nil {
-		t.Fatalf("Expected no error, got: %v", err)
-	}
+	require.NoError(t, err, "Expected no error, got: %v")
 
 	h.assertOutputContains("model: thorough-model")
 }
@@ -269,9 +250,7 @@ review_reasoning = "fast"
 `)
 
 	err := h.run(runOpts{})
-	if err != nil {
-		t.Fatalf("Expected no error, got: %v", err)
-	}
+	require.NoError(t, err, "Expected no error, got: %v")
 
 	h.assertOutputContains("reasoning: fast")
 }
@@ -280,9 +259,7 @@ func TestLocalReviewQuietMode(t *testing.T) {
 	h := newReviewHarness(t)
 
 	err := h.run(runOpts{Agent: "test", Reasoning: "fast", Quiet: true})
-	if err != nil {
-		t.Fatalf("Expected no error, got: %v", err)
-	}
+	require.NoError(t, err, "Expected no error, got: %v")
 
 	h.assertOutputNotContains("Running")
 }
@@ -293,7 +270,6 @@ func TestLocalReviewSkipsDaemon(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 
 	err := h.run(runOpts{Agent: "test", Reasoning: "fast"})
-	if err != nil {
-		t.Fatalf("Expected --local to work without daemon, got: %v", err)
-	}
+	require.NoError(t, err, "Expected --local to work without daemon, got: %v")
+
 }

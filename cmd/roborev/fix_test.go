@@ -27,6 +27,8 @@ import (
 	"github.com/roborev-dev/roborev/internal/config"
 	"github.com/roborev-dev/roborev/internal/storage"
 	"github.com/roborev-dev/roborev/internal/testutil"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func patchFixDaemonRetryForTest(t *testing.T, ensure func() error) {
@@ -67,13 +69,10 @@ func closeConnNoResponse(t *testing.T, w http.ResponseWriter) {
 	t.Helper()
 
 	hj, ok := w.(http.Hijacker)
-	if !ok {
-		t.Fatal("response writer does not support hijacking")
-	}
+	assert.True(t, ok, "response writer does not support hijacking")
 	conn, _, err := hj.Hijack()
-	if err != nil {
-		t.Fatalf("hijack connection: %v", err)
-	}
+	require.NoError(t, err, "hijack connection: %v")
+
 	_ = conn.Close()
 }
 
@@ -89,34 +88,22 @@ func TestBuildGenericFixPrompt(t *testing.T) {
 	prompt := buildGenericFixPrompt(analysisOutput, "")
 
 	// Should include the analysis output
-	if !strings.Contains(prompt, "Issues Found") {
-		t.Error("prompt should include analysis output")
-	}
-	if !strings.Contains(prompt, "Long function") {
-		t.Error("prompt should include specific findings")
-	}
+	assert.Contains(t, prompt, "Issues Found")
+	assert.Contains(t, prompt, "Long function")
 
 	// Should have fix instructions
-	if !strings.Contains(prompt, "apply the suggested changes") {
-		t.Error("prompt should include fix instructions")
-	}
+	assert.Contains(t, prompt, "apply the suggested changes")
 
 	// Should request a commit
-	if !strings.Contains(prompt, "git commit") {
-		t.Error("prompt should request a commit")
-	}
+	assert.Contains(t, prompt, "git commit")
 }
 
 func TestBuildGenericCommitPrompt(t *testing.T) {
 	prompt := buildGenericCommitPrompt()
 
 	// Should have commit instructions
-	if !strings.Contains(prompt, "git commit") {
-		t.Error("prompt should mention git commit")
-	}
-	if !strings.Contains(prompt, "descriptive") {
-		t.Error("prompt should request a descriptive message")
-	}
+	assert.Contains(t, prompt, "git commit")
+	assert.Contains(t, prompt, "descriptive")
 }
 
 func TestFetchJob(t *testing.T) {
@@ -164,27 +151,21 @@ func TestFetchJob(t *testing.T) {
 			job, err := fetchJob(context.Background(), ts.URL, 42)
 
 			if tt.wantErr {
-				if err == nil {
-					t.Error("expected error")
-				} else if !strings.Contains(err.Error(), tt.wantErrMsg) {
-					t.Errorf("error %q should contain %q", err.Error(), tt.wantErrMsg)
-				}
+				require.Error(t, err, "expected error")
+				assert.Contains(t, err.Error(), tt.wantErrMsg, "unexpected error")
 				return
 			}
 
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if job.ID != 42 {
-				t.Errorf("job.ID = %d, want 42", job.ID)
-			}
+			require.NoError(t, err)
+			assert.EqualValues(t, 42, job.ID)
 		})
 	}
 }
 
 func TestFetchJobCanceledContextDoesNotRetryRecovery(t *testing.T) {
+	var recoveryAttempted atomic.Bool
 	patchFixDaemonRetryForTest(t, func() error {
-		t.Fatal("fetchJob should not attempt daemon recovery after context cancellation")
+		recoveryAttempted.Store(true)
 		return nil
 	})
 
@@ -192,9 +173,8 @@ func TestFetchJobCanceledContextDoesNotRetryRecovery(t *testing.T) {
 	cancel()
 
 	_, err := fetchJob(ctx, "http://127.0.0.1:1", 42)
-	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("expected context canceled, got: %v", err)
-	}
+	require.ErrorIs(t, err, context.Canceled)
+	assert.False(t, recoveryAttempted.Load(), "unexpected daemon recovery attempt")
 }
 
 func TestFetchReview(t *testing.T) {
@@ -224,12 +204,8 @@ func TestFetchReview(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.URL.Path != "/api/review" {
-					t.Errorf("unexpected path: %s", r.URL.Path)
-				}
-				if r.URL.Query().Get("job_id") != "42" {
-					t.Errorf("unexpected job_id: %s", r.URL.Query().Get("job_id"))
-				}
+				assert.Equal(t, "/api/review", r.URL.Path)
+				assert.Equal(t, "42", r.URL.Query().Get("job_id"))
 
 				w.WriteHeader(tt.statusCode)
 				if tt.review != nil {
@@ -241,30 +217,22 @@ func TestFetchReview(t *testing.T) {
 			review, err := fetchReview(context.Background(), ts.URL, 42)
 
 			if tt.wantErr {
-				if err == nil {
-					t.Error("expected error")
-				} else if !strings.Contains(err.Error(), tt.wantErrMsg) {
-					t.Errorf("error %q should contain %q", err.Error(), tt.wantErrMsg)
-				}
+				require.Error(t, err, "expected error")
+				assert.Contains(t, err.Error(), tt.wantErrMsg, "unexpected error")
 				return
 			}
 
-			if err != nil {
-				t.Fatalf("fetchReview: %v", err)
-			}
-			if review.JobID != tt.review.JobID {
-				t.Errorf("review.JobID = %d, want %d", review.JobID, tt.review.JobID)
-			}
-			if review.Output != tt.review.Output {
-				t.Errorf("review.Output = %q, want %q", review.Output, tt.review.Output)
-			}
+			require.NoError(t, err, "fetchReview")
+			assert.Equal(t, review.JobID, tt.review.JobID)
+			assert.Equal(t, review.Output, tt.review.Output)
 		})
 	}
 }
 
 func TestFetchReviewDeadlineExceededDoesNotRetryRecovery(t *testing.T) {
+	var recoveryAttempted atomic.Bool
 	patchFixDaemonRetryForTest(t, func() error {
-		t.Fatal("fetchReview should not attempt daemon recovery after deadline exceeded")
+		recoveryAttempted.Store(true)
 		return nil
 	})
 
@@ -277,9 +245,8 @@ func TestFetchReviewDeadlineExceededDoesNotRetryRecovery(t *testing.T) {
 	defer cancel()
 
 	_, err := fetchReview(ctx, ts.URL, 42)
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("expected context deadline exceeded, got: %v", err)
-	}
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	assert.False(t, recoveryAttempted.Load(), "unexpected daemon recovery attempt")
 }
 
 func TestWithFixDaemonRetryContextRetriesClientTimeoutWhenCallerContextActive(t *testing.T) {
@@ -296,18 +263,10 @@ func TestWithFixDaemonRetryContextRetriesClientTimeoutWhenCallerContextActive(t 
 		}
 		return "ok", nil
 	})
-	if err != nil {
-		t.Fatalf("withFixDaemonRetryContext: %v", err)
-	}
-	if value != "ok" {
-		t.Fatalf("expected successful retry result, got %q", value)
-	}
-	if attempts.Load() != 2 {
-		t.Fatalf("expected 2 attempts, got %d", attempts.Load())
-	}
-	if ensureCalls.Load() != 1 {
-		t.Fatalf("expected one recovery attempt, got %d", ensureCalls.Load())
-	}
+	require.NoError(t, err, "withFixDaemonRetryContext")
+	assert.Equal(t, "ok", value)
+	assert.EqualValues(t, 2, attempts.Load())
+	assert.EqualValues(t, 1, ensureCalls.Load())
 }
 
 func TestWithFixDaemonRetryContextStopsAfterCancellationDuringRecovery(t *testing.T) {
@@ -339,15 +298,9 @@ func TestWithFixDaemonRetryContextStopsAfterCancellationDuringRecovery(t *testin
 		attempts.Add(1)
 		return "", &neturl.Error{Op: "Get", URL: addr, Err: syscall.ECONNREFUSED}
 	})
-	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("expected context canceled, got %v", err)
-	}
-	if attempts.Load() != 1 {
-		t.Fatalf("expected no retry after cancellation during recovery, got %d attempts", attempts.Load())
-	}
-	if ensureCalls.Load() == 0 {
-		t.Fatal("expected daemon recovery to be attempted")
-	}
+	require.ErrorIs(t, err, context.Canceled)
+	assert.EqualValues(t, 1, attempts.Load())
+	assert.NotEqual(t, 0, ensureCalls.Load(), "expected daemon recovery to be attempted")
 }
 
 func TestWithFixDaemonRetryContextReturnsRecoveryFailure(t *testing.T) {
@@ -376,11 +329,9 @@ func TestWithFixDaemonRetryContextReturnsRecoveryFailure(t *testing.T) {
 		return "", &neturl.Error{Op: "Get", URL: addr, Err: syscall.ECONNREFUSED}
 	})
 	if !errors.Is(err, recoveryErr) {
-		t.Fatalf("expected recovery failure, got %v", err)
+		require.NoError(t, err, "expected recovery failure, got %v")
 	}
-	if attempts.Load() != 1 {
-		t.Fatalf("expected stale request not to be retried after recovery failure, got %d attempts", attempts.Load())
-	}
+	assert.EqualValues(t, 1, attempts.Load())
 }
 
 func TestAddJobResponse(t *testing.T) {
@@ -390,15 +341,11 @@ func TestAddJobResponse(t *testing.T) {
 	var gotCommenter string
 
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/comment" || r.Method != http.MethodPost {
-			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
-		}
+		assert.False(t, r.URL.Path != "/api/comment" || r.Method != http.MethodPost)
 
 		var req map[string]any
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			t.Errorf("decode request body: %v", err)
-			return
-		}
+		err := json.NewDecoder(r.Body).Decode(&req)
+		assert.NoError(t, err)
 		gotJobID = int64(req["job_id"].(float64))
 		gotContent = req["comment"].(string)
 		gotCommenter = req["commenter"].(string)
@@ -408,19 +355,11 @@ func TestAddJobResponse(t *testing.T) {
 	defer ts.Close()
 
 	err := addJobResponse(context.Background(), ts.URL, 123, "roborev-fix", "Fix applied")
-	if err != nil {
-		t.Fatalf("addJobResponse: %v", err)
-	}
+	require.NoError(t, err, "addJobResponse")
 
-	if gotJobID != 123 {
-		t.Errorf("job_id = %d, want 123", gotJobID)
-	}
-	if gotContent != "Fix applied" {
-		t.Errorf("comment = %q, want %q", gotContent, "Fix applied")
-	}
-	if gotCommenter != "roborev-fix" {
-		t.Errorf("commenter = %q, want %q", gotCommenter, "roborev-fix")
-	}
+	assert.EqualValues(t, 123, gotJobID)
+	assert.Equal(t, "Fix applied", gotContent)
+	assert.Equal(t, "roborev-fix", gotCommenter)
 }
 
 func TestAddJobResponseAvoidsDuplicatePostAfterConnectionDrop(t *testing.T) {
@@ -435,7 +374,7 @@ func TestAddJobResponseAvoidsDuplicatePostAfterConnectionDrop(t *testing.T) {
 			firstPostCount.Add(1)
 			var req map[string]any
 			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-				t.Fatalf("decode request body: %v", err)
+				assert.NoError(t, err, "decode request body: %v")
 			}
 			responsesMu.Lock()
 			responses = append(responses, storage.Response{
@@ -474,20 +413,16 @@ func TestAddJobResponseAvoidsDuplicatePostAfterConnectionDrop(t *testing.T) {
 	})
 
 	err := addJobResponse(context.Background(), startServer.URL, 123, "roborev-fix", "Fix applied")
-	if err != nil {
-		t.Fatalf("addJobResponse: %v", err)
-	}
-	if firstPostCount.Load() != 1 {
-		t.Fatalf("expected one initial comment post, got %d", firstPostCount.Load())
-	}
-	if recoveryPostCount.Load() != 0 {
-		t.Fatalf("expected no duplicate comment post after recovery, got %d", recoveryPostCount.Load())
-	}
+	require.NoError(t, err, "addJobResponse: %v")
+
+	assert.EqualValues(t, 1, firstPostCount.Load())
+	assert.EqualValues(t, 0, recoveryPostCount.Load())
 }
 
 func TestAddJobResponseCanceledContextDoesNotAttemptRecovery(t *testing.T) {
+	var recoveryAttempted atomic.Bool
 	patchFixDaemonRetryForTest(t, func() error {
-		t.Fatal("addJobResponse should not attempt daemon recovery after context cancellation")
+		recoveryAttempted.Store(true)
 		return nil
 	})
 
@@ -503,14 +438,15 @@ func TestAddJobResponseCanceledContextDoesNotAttemptRecovery(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	if err := addJobResponse(ctx, ts.URL, 123, "roborev-fix", "Fix applied"); err == nil {
-		t.Fatal("expected connection error")
-	}
+	err := addJobResponse(ctx, ts.URL, 123, "roborev-fix", "Fix applied")
+	require.Error(t, err, "expected connection error")
+	assert.False(t, recoveryAttempted.Load(), "unexpected daemon recovery attempt")
 }
 
 func TestAddJobResponseDeadlineExceededCancelsHTTPCall(t *testing.T) {
+	var recoveryAttempted atomic.Bool
 	patchFixDaemonRetryForTest(t, func() error {
-		t.Fatal("addJobResponse should not attempt daemon recovery after request deadline exceeded")
+		recoveryAttempted.Store(true)
 		return nil
 	})
 
@@ -527,9 +463,8 @@ func TestAddJobResponseDeadlineExceededCancelsHTTPCall(t *testing.T) {
 	defer cancel()
 
 	err := addJobResponse(ctx, ts.URL, 123, "roborev-fix", "Fix applied")
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("expected context deadline exceeded, got %v", err)
-	}
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	assert.False(t, recoveryAttempted.Load(), "unexpected daemon recovery attempt")
 }
 
 func TestFixSingleJob(t *testing.T) {
@@ -559,18 +494,12 @@ func TestFixSingleJob(t *testing.T) {
 	}
 
 	err := fixSingleJob(cmd, repo.Dir, 99, opts)
-	if err != nil {
-		t.Fatalf("fixSingleJob: %v", err)
-	}
+	require.NoError(t, err, "fixSingleJob")
 
 	// Verify output contains expected content
 	outputStr := output.String()
-	if !strings.Contains(outputStr, "Issues") {
-		t.Error("output should show analysis findings")
-	}
-	if !strings.Contains(outputStr, "closed") {
-		t.Error("output should confirm job closed")
-	}
+	assert.Contains(t, outputStr, "Issues")
+	assert.Contains(t, outputStr, "closed")
 }
 
 func TestFixSingleJobRecoversPostFixDaemonCalls(t *testing.T) {
@@ -579,9 +508,7 @@ func TestFixSingleJobRecoversPostFixDaemonCalls(t *testing.T) {
 	})
 
 	originalAgent, err := agent.Get("test")
-	if err != nil {
-		t.Fatalf("get test agent: %v", err)
-	}
+	require.NoError(t, err, "get test agent")
 	agent.Register(&agent.FakeAgent{
 		NameStr: "test",
 		ReviewFn: func(_ context.Context, repoPath, _, _ string, _ io.Writer) (string, error) {
@@ -663,32 +590,16 @@ func TestFixSingleJobRecoversPostFixDaemonCalls(t *testing.T) {
 	}
 
 	err = fixSingleJob(cmd, repo.Dir, 99, opts)
-	if err != nil {
-		t.Fatalf("fixSingleJob: %v", err)
-	}
+	require.NoError(t, err, "fixSingleJob")
 
 	outputStr := output.String()
-	if ensureCalls.Load() == 0 {
-		t.Fatal("expected daemon recovery to be attempted")
-	}
-	if strings.Contains(outputStr, "Warning: could not enqueue review for fix commit") {
-		t.Fatalf("unexpected enqueue warning after recovery:\n%s", outputStr)
-	}
-	if strings.Contains(outputStr, "Warning: could not add response to job") {
-		t.Fatalf("unexpected comment warning after recovery:\n%s", outputStr)
-	}
-	if strings.Contains(outputStr, "Warning: could not close job") {
-		t.Fatalf("unexpected close warning after recovery:\n%s", outputStr)
-	}
-	if enqueueCount.Load() != 1 {
-		t.Fatalf("expected one recovered enqueue, got %d", enqueueCount.Load())
-	}
-	if commentCount.Load() != 1 {
-		t.Fatalf("expected one recovered comment, got %d", commentCount.Load())
-	}
-	if closeCount.Load() != 1 {
-		t.Fatalf("expected one recovered close, got %d", closeCount.Load())
-	}
+	assert.NotEqual(t, 0, ensureCalls.Load(), "expected daemon recovery to be attempted")
+	assert.NotContains(t, outputStr, "Warning: could not enqueue review for fix commit")
+	assert.NotContains(t, outputStr, "Warning: could not add response to job")
+	assert.NotContains(t, outputStr, "Warning: could not close job")
+	assert.EqualValues(t, 1, enqueueCount.Load())
+	assert.EqualValues(t, 1, commentCount.Load())
+	assert.EqualValues(t, 1, closeCount.Load())
 }
 
 func TestFixJobNotComplete(t *testing.T) {
@@ -708,13 +619,8 @@ func TestFixJobNotComplete(t *testing.T) {
 	cmd, _ := newTestCmd(t)
 
 	err := fixSingleJob(cmd, t.TempDir(), 99, fixOptions{agentName: "test"})
-
-	if err == nil {
-		t.Error("expected error for incomplete job")
-	}
-	if !strings.Contains(err.Error(), "not complete") {
-		t.Errorf("error %q should mention 'not complete'", err.Error())
-	}
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not complete")
 }
 
 func TestFixCmdFlagValidation(t *testing.T) {
@@ -787,12 +693,8 @@ func TestFixCmdFlagValidation(t *testing.T) {
 			cmd.SilenceErrors = true
 			cmd.SetArgs(tt.args)
 			err := cmd.Execute()
-			if err == nil {
-				t.Fatal("expected error")
-			}
-			if !strings.Contains(err.Error(), tt.wantErr) {
-				t.Errorf("error %q should contain %q", err.Error(), tt.wantErr)
-			}
+			require.Error(t, err, "expected error")
+			assert.Contains(t, err.Error(), tt.wantErr)
 		})
 	}
 }
@@ -819,9 +721,7 @@ func TestFixNoArgsDefaultsToOpen(t *testing.T) {
 	err := cmd.Execute()
 	// Should NOT be a validation/args error; any other error (e.g. daemon
 	// not running) is acceptable.
-	if err != nil && strings.Contains(err.Error(), "requires at least") {
-		t.Errorf("no-args should default to --open, got validation error: %v", err)
-	}
+	assert.False(t, err != nil && strings.Contains(err.Error(), "requires at least"))
 }
 
 func TestFixAllBranchesImpliesOpen(t *testing.T) {
@@ -839,9 +739,7 @@ func TestFixAllBranchesImpliesOpen(t *testing.T) {
 	cmd.SilenceErrors = true
 	cmd.SetArgs([]string{"--all-branches"})
 	err := cmd.Execute()
-	if err != nil {
-		t.Errorf("--all-branches should not fail validation: %v", err)
-	}
+	require.NoError(t, err)
 }
 
 func TestRunFixOpen(t *testing.T) {
@@ -851,12 +749,8 @@ func TestRunFixOpen(t *testing.T) {
 		_ = newMockDaemonBuilder(t).
 			WithHandler("/api/jobs", func(w http.ResponseWriter, r *http.Request) {
 				q := r.URL.Query()
-				if q.Get("status") != "done" {
-					t.Errorf("expected status=done, got %q", q.Get("status"))
-				}
-				if q.Get("closed") != "false" {
-					t.Errorf("expected closed=false, got %q", q.Get("closed"))
-				}
+				assert.Equal(t, "done", q.Get("status"))
+				assert.Equal(t, "false", q.Get("closed"))
 				writeJSON(w, map[string]any{
 					"jobs":     []storage.ReviewJob{},
 					"has_more": false,
@@ -867,12 +761,8 @@ func TestRunFixOpen(t *testing.T) {
 		out, err := runWithOutput(t, repo.Dir, func(cmd *cobra.Command) error {
 			return runFixOpen(cmd, "", false, fixOptions{agentName: "test"})
 		})
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		if !strings.Contains(out, "No open jobs found") {
-			t.Errorf("expected 'No open jobs found' message, got %q", out)
-		}
+		require.NoError(t, err, "runFixOpen")
+		assert.Contains(t, out, "No open jobs found")
 	})
 
 	t.Run("finds and processes open jobs", func(t *testing.T) {
@@ -922,18 +812,10 @@ func TestRunFixOpen(t *testing.T) {
 		out, err := runWithOutput(t, repo.Dir, func(cmd *cobra.Command) error {
 			return runFixOpen(cmd, "", false, fixOptions{agentName: "test", reasoning: "fast"})
 		})
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		if !strings.Contains(out, "Found 2 open job(s)") {
-			t.Errorf("expected count message, got %q", out)
-		}
-		if rc := reviewCalls.Load(); rc != 2 {
-			t.Errorf("expected 2 review fetches, got %d", rc)
-		}
-		if ac := closeCalls.Load(); ac != 2 {
-			t.Errorf("expected 2 close calls, got %d", ac)
-		}
+		require.NoError(t, err, "runFixOpen")
+		assert.Contains(t, out, "Found 2 open job(s)")
+		assert.EqualValues(t, int64(2), reviewCalls.Load())
+		assert.EqualValues(t, int64(2), closeCalls.Load())
 	})
 
 	t.Run("passes branch filter to API", func(t *testing.T) {
@@ -953,12 +835,8 @@ func TestRunFixOpen(t *testing.T) {
 		_, err := runWithOutput(t, repo.Dir, func(cmd *cobra.Command) error {
 			return runFixOpen(cmd, "feature-branch", false, fixOptions{agentName: "test"})
 		})
-		if err != nil {
-			t.Fatalf("runFixOpen returned unexpected error: %v", err)
-		}
-		if gotBranch != "feature-branch" {
-			t.Errorf("expected branch=feature-branch, got %q", gotBranch)
-		}
+		require.NoError(t, err, "runFixOpen")
+		assert.Equal(t, "feature-branch", gotBranch)
 	})
 
 	t.Run("server error", func(t *testing.T) {
@@ -972,12 +850,8 @@ func TestRunFixOpen(t *testing.T) {
 		_, err := runWithOutput(t, repo.Dir, func(cmd *cobra.Command) error {
 			return runFixOpen(cmd, "", false, fixOptions{agentName: "test"})
 		})
-		if err == nil {
-			t.Fatal("expected error on server failure")
-		}
-		if !strings.Contains(err.Error(), "server error") {
-			t.Errorf("error %q should mention server error", err.Error())
-		}
+		require.Error(t, err, "expected error on server failure")
+		assert.Contains(t, err.Error(), "server error")
 	})
 }
 func TestRunFixOpenOrdering(t *testing.T) {
@@ -1036,12 +910,9 @@ func TestRunFixOpenOrdering(t *testing.T) {
 		out, err := runWithOutput(t, repo.Dir, func(cmd *cobra.Command) error {
 			return runFixOpen(cmd, "", false, fixOptions{agentName: "test", reasoning: "fast"})
 		})
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		if !strings.Contains(out, "[10 20 30]") {
-			t.Errorf("expected oldest-first order [10 20 30], got %q", out)
-		}
+		require.NoError(t, err)
+
+		assert.Contains(t, out, "[10 20 30]")
 	})
 
 	t.Run("newest first with flag", func(t *testing.T) {
@@ -1051,12 +922,9 @@ func TestRunFixOpenOrdering(t *testing.T) {
 		out, err := runWithOutput(t, repo.Dir, func(cmd *cobra.Command) error {
 			return runFixOpen(cmd, "", true, fixOptions{agentName: "test", reasoning: "fast"})
 		})
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		if !strings.Contains(out, "[30 20 10]") {
-			t.Errorf("expected newest-first order [30 20 10], got %q", out)
-		}
+		require.NoError(t, err)
+
+		assert.Contains(t, out, "[30 20 10]")
 	})
 }
 func TestRunFixOpenRequery(t *testing.T) {
@@ -1120,19 +988,11 @@ func TestRunFixOpenRequery(t *testing.T) {
 	out, err := runWithOutput(t, repo.Dir, func(cmd *cobra.Command) error {
 		return runFixOpen(cmd, "", false, fixOptions{agentName: "test", reasoning: "fast"})
 	})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
+	require.NoError(t, err)
 
-	if !strings.Contains(out, "Found 1 open job(s)") {
-		t.Errorf("expected first batch message, got %q", out)
-	}
-	if !strings.Contains(out, "Found 1 new open job(s)") {
-		t.Errorf("expected second batch message, got %q", out)
-	}
-	if int(queryCount.Load()) != 3 {
-		t.Errorf("expected 3 queries, got %d", queryCount.Load())
-	}
+	assert.Contains(t, out, "Found 1 open job(s)")
+	assert.Contains(t, out, "Found 1 new open job(s)")
+	assert.Equal(t, 3, int(queryCount.Load()))
 }
 
 func TestRunFixOpenRecoversFromDaemonRestartOnRequery(t *testing.T) {
@@ -1222,19 +1082,13 @@ func TestRunFixOpenRecoversFromDaemonRestartOnRequery(t *testing.T) {
 	out, err := runWithOutput(t, repo.Dir, func(cmd *cobra.Command) error {
 		return runFixOpen(cmd, "", false, fixOptions{agentName: "test", reasoning: "fast"})
 	})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
+	require.NoError(t, err)
 
 	if ensureCalls.Load() == 0 {
-		t.Fatal("expected daemon recovery to be attempted")
+		require.NoError(t, err, "expected daemon recovery to be attempted")
 	}
-	if !strings.Contains(out, "Found 1 open job(s)") {
-		t.Errorf("expected initial batch output, got %q", out)
-	}
-	if !strings.Contains(out, "Found 1 new open job(s)") {
-		t.Errorf("expected recovered requery output, got %q", out)
-	}
+	assert.Contains(t, out, "Found 1 open job(s)")
+	assert.Contains(t, out, "Found 1 new open job(s)")
 }
 
 func TestFixJobDirectUnbornHead(t *testing.T) {
@@ -1247,18 +1101,17 @@ func TestFixJobDirectUnbornHead(t *testing.T) {
 		dir := t.TempDir()
 		cmd := exec.Command("git", "init")
 		cmd.Dir = dir
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("git init: %v\n%s", err, out)
-		}
+		out, err := cmd.CombinedOutput()
+		require.NoError(t, err, "git init failed: %v", err)
+		assert.NotEmpty(t, out, "git init should produce stdout output")
 		for _, args := range [][]string{
 			{"config", "user.email", "test@test.com"},
 			{"config", "user.name", "Test"},
 		} {
 			c := exec.Command("git", args...)
 			c.Dir = dir
-			if err := c.Run(); err != nil {
-				t.Fatalf("git %v: %v", args, err)
-			}
+			err := c.Run()
+			require.NoError(t, err, "git %v: %v", args, err)
 		}
 
 		ag := &agent.FakeAgent{
@@ -1286,27 +1139,19 @@ func TestFixJobDirectUnbornHead(t *testing.T) {
 			RepoRoot: dir,
 			Agent:    ag,
 		}, "fix things")
-		if err != nil {
-			t.Fatalf("fixJobDirect: %v", err)
-		}
-		if !result.CommitCreated {
-			t.Error("expected CommitCreated=true")
-		}
-		if result.NoChanges {
-			t.Error("expected NoChanges=false")
-		}
-		if result.NewCommitSHA == "" {
-			t.Error("expected NewCommitSHA to be set")
-		}
+		require.NoError(t, err, "fixJobDirect: %v")
+
+		assert.True(t, result.CommitCreated)
+		assert.False(t, result.NoChanges)
+		assert.NotEmpty(t, result.NewCommitSHA)
 	})
 
 	t.Run("agent makes no changes on unborn head", func(t *testing.T) {
 		dir := t.TempDir()
 		cmd := exec.Command("git", "init")
 		cmd.Dir = dir
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("git init: %v\n%s", err, out)
-		}
+		out, err := cmd.CombinedOutput()
+		require.NoError(t, err, "git init failed: %v\n%s", err, out)
 
 		ag := &agent.FakeAgent{
 			NameStr: "test",
@@ -1319,15 +1164,10 @@ func TestFixJobDirectUnbornHead(t *testing.T) {
 			RepoRoot: dir,
 			Agent:    ag,
 		}, "fix things")
-		if err != nil {
-			t.Fatalf("fixJobDirect: %v", err)
-		}
-		if result.CommitCreated {
-			t.Error("expected CommitCreated=false")
-		}
-		if !result.NoChanges {
-			t.Error("expected NoChanges=true")
-		}
+		require.NoError(t, err, "fixJobDirect: %v")
+
+		assert.False(t, result.CommitCreated)
+		assert.True(t, result.NoChanges)
 	})
 }
 
@@ -1348,34 +1188,18 @@ func TestBuildBatchFixPrompt(t *testing.T) {
 	prompt := buildBatchFixPrompt(entries, "")
 
 	// Header
-	if !strings.Contains(prompt, "# Batch Fix Request") {
-		t.Error("prompt should have batch header")
-	}
-	if !strings.Contains(prompt, "Address all findings across all reviews in a single pass") {
-		t.Error("prompt should instruct single-pass fix")
-	}
+	assert.Contains(t, prompt, "# Batch Fix Request")
+	assert.Contains(t, prompt, "Address all findings across all reviews in a single pass")
 
 	// Per-review sections with numbered headers
-	if !strings.Contains(prompt, "## Review 1 (Job 123 — abc123d)") {
-		t.Errorf("prompt missing review 1 header, got:\n%s", prompt)
-	}
-	if !strings.Contains(prompt, "Found bug in foo.go") {
-		t.Error("prompt should include first review output")
-	}
-	if !strings.Contains(prompt, "## Review 2 (Job 456 — deadbee)") {
-		t.Errorf("prompt missing review 2 header, got:\n%s", prompt)
-	}
-	if !strings.Contains(prompt, "Missing error check in bar.go") {
-		t.Error("prompt should include second review output")
-	}
+	assert.Contains(t, prompt, "## Review 1 (Job 123 — abc123d)")
+	assert.Contains(t, prompt, "Found bug in foo.go")
+	assert.Contains(t, prompt, "## Review 2 (Job 456 — deadbee)")
+	assert.Contains(t, prompt, "Missing error check in bar.go")
 
 	// Instructions footer
-	if !strings.Contains(prompt, "## Instructions") {
-		t.Error("prompt should have instructions section")
-	}
-	if !strings.Contains(prompt, "git commit") {
-		t.Error("prompt should request a commit")
-	}
+	assert.Contains(t, prompt, "## Instructions")
+	assert.Contains(t, prompt, "git commit")
 }
 
 func TestBuildBatchFixPromptSingleEntry(t *testing.T) {
@@ -1388,9 +1212,7 @@ func TestBuildBatchFixPromptSingleEntry(t *testing.T) {
 	}
 
 	prompt := buildBatchFixPrompt(entries, "")
-	if !strings.Contains(prompt, "## Review 1 (Job 7") {
-		t.Error("single-entry batch should still have numbered header")
-	}
+	assert.Contains(t, prompt, "## Review 1 (Job 7")
 }
 
 func TestSplitIntoBatches(t *testing.T) {
@@ -1409,12 +1231,8 @@ func TestSplitIntoBatches(t *testing.T) {
 			makeEntry(3, 100),
 		}
 		batches := splitIntoBatches(entries, 100000, "")
-		if len(batches) != 1 {
-			t.Errorf("expected 1 batch, got %d", len(batches))
-		}
-		if len(batches[0]) != 3 {
-			t.Errorf("expected 3 entries in batch, got %d", len(batches[0]))
-		}
+		assert.Len(t, batches, 1)
+		assert.Len(t, batches[0], 3)
 	})
 
 	t.Run("splits when exceeding limit", func(t *testing.T) {
@@ -1426,17 +1244,13 @@ func TestSplitIntoBatches(t *testing.T) {
 		// Set limit small enough that not all fit (overhead ~300 bytes + entry ~530 each)
 		maxSize := 1000
 		batches := splitIntoBatches(entries, maxSize, "")
-		if len(batches) < 2 {
-			t.Errorf("expected at least 2 batches, got %d", len(batches))
-		}
+		assert.GreaterOrEqual(t, len(batches), 2)
 		// All entries should be present across batches
 		total := 0
 		for _, b := range batches {
 			total += len(b)
 		}
-		if total != 3 {
-			t.Errorf("expected 3 total entries, got %d", total)
-		}
+		assert.Equal(t, 3, total)
 	})
 
 	t.Run("oversized single review gets own batch", func(t *testing.T) {
@@ -1446,9 +1260,7 @@ func TestSplitIntoBatches(t *testing.T) {
 			makeEntry(3, 100),
 		}
 		batches := splitIntoBatches(entries, 1000, "")
-		if len(batches) < 2 {
-			t.Errorf("expected at least 2 batches, got %d", len(batches))
-		}
+		assert.GreaterOrEqual(t, len(batches), 2)
 		// The oversized entry should be alone in its batch
 		found := false
 		for _, b := range batches {
@@ -1458,16 +1270,12 @@ func TestSplitIntoBatches(t *testing.T) {
 				}
 			}
 		}
-		if !found {
-			t.Error("oversized entry (job 2) should be alone in its batch")
-		}
+		assert.True(t, found)
 	})
 
 	t.Run("empty input", func(t *testing.T) {
 		batches := splitIntoBatches(nil, 100000, "")
-		if len(batches) != 0 {
-			t.Errorf("expected 0 batches for empty input, got %d", len(batches))
-		}
+		assert.Empty(t, batches)
 	})
 
 	t.Run("built prompt respects size estimate", func(t *testing.T) {
@@ -1481,12 +1289,10 @@ func TestSplitIntoBatches(t *testing.T) {
 		}
 		maxSize := 1000
 		batches := splitIntoBatches(entries, maxSize, "")
-		for i, batch := range batches {
+		for _, batch := range batches {
 			prompt := buildBatchFixPrompt(batch, "")
 			// Single-entry batches that are inherently oversized are allowed to exceed.
-			if len(batch) > 1 && len(prompt) > maxSize {
-				t.Errorf("batch %d prompt size %d exceeds maxSize %d", i, len(prompt), maxSize)
-			}
+			assert.False(t, len(batch) > 1 && len(prompt) > maxSize)
 		}
 	})
 
@@ -1497,13 +1303,9 @@ func TestSplitIntoBatches(t *testing.T) {
 			makeEntry(30, 100),
 		}
 		batches := splitIntoBatches(entries, 100000, "")
-		if len(batches) != 1 {
-			t.Fatalf("expected 1 batch, got %d", len(batches))
-		}
+		assert.Len(t, batches, 1)
 		for i, want := range []int64{10, 20, 30} {
-			if batches[0][i].jobID != want {
-				t.Errorf("batch[0][%d].jobID = %d, want %d", i, batches[0][i].jobID, want)
-			}
+			assert.Equal(t, want, batches[0][i].jobID)
 		}
 	})
 
@@ -1518,20 +1320,22 @@ func TestSplitIntoBatches(t *testing.T) {
 		batchesNoSev := splitIntoBatches(entries, 1200, "")
 		batchesWithSev := splitIntoBatches(entries, 1200, "high")
 		if len(batchesWithSev) < len(batchesNoSev) {
-			t.Errorf(
-				"severity filter should not reduce batch count: "+
-					"without=%d, with=%d",
-				len(batchesNoSev), len(batchesWithSev),
-			)
+			assert.Condition(t, func() bool {
+				return false
+			}, "severity filter should not reduce batch count: "+
+				"without=%d, with=%d",
+				len(batchesNoSev), len(batchesWithSev))
+
 		}
 		// Verify the prompt respects the size estimate
 		for i, batch := range batchesWithSev {
 			p := buildBatchFixPrompt(batch, "high")
 			if len(batch) > 1 && len(p) > 1200 {
-				t.Errorf(
-					"batch %d prompt size %d exceeds limit 1200",
-					i, len(p),
-				)
+				assert.Condition(t, func() bool {
+					return false
+				}, "batch %d prompt size %d exceeds limit 1200",
+					i, len(p))
+
 			}
 		}
 	})
@@ -1548,9 +1352,7 @@ func TestFormatJobIDs(t *testing.T) {
 	}
 	for _, tt := range tests {
 		got := formatJobIDs(tt.ids)
-		if got != tt.want {
-			t.Errorf("formatJobIDs(%v) = %q, want %q", tt.ids, got, tt.want)
-		}
+		assert.Equal(t, tt.want, got)
 	}
 }
 
@@ -1576,12 +1378,9 @@ func TestEnqueueIfNeededSkipsWhenJobExists(t *testing.T) {
 	defer ts.Close()
 
 	err := enqueueIfNeeded(context.Background(), ts.URL, repo.Dir, sha)
-	if err != nil {
-		t.Fatalf("enqueueIfNeeded: %v", err)
-	}
-	if enqueueCalls.Load() != 0 {
-		t.Error("should not enqueue when job already exists on first check")
-	}
+	require.NoError(t, err, "enqueueIfNeeded: %v")
+
+	assert.EqualValues(t, 0, enqueueCalls.Load())
 }
 
 func TestEnqueueIfNeededAvoidsDuplicatePostAfterConnectionDrop(t *testing.T) {
@@ -1629,15 +1428,10 @@ func TestEnqueueIfNeededAvoidsDuplicatePostAfterConnectionDrop(t *testing.T) {
 	})
 
 	err := enqueueIfNeeded(context.Background(), startServer.URL, repo.Dir, sha)
-	if err != nil {
-		t.Fatalf("enqueueIfNeeded: %v", err)
-	}
-	if firstPostCount.Load() != 1 {
-		t.Fatalf("expected one initial enqueue post, got %d", firstPostCount.Load())
-	}
-	if recoveryPostCount.Load() != 0 {
-		t.Fatalf("expected no duplicate enqueue post after recovery, got %d", recoveryPostCount.Load())
-	}
+	require.NoError(t, err, "enqueueIfNeeded: %v")
+
+	assert.EqualValues(t, 1, firstPostCount.Load())
+	assert.EqualValues(t, 0, recoveryPostCount.Load())
 }
 
 func TestEnqueueIfNeededSkipsEnqueueAfterTransientProbeFailure(t *testing.T) {
@@ -1676,15 +1470,10 @@ func TestEnqueueIfNeededSkipsEnqueueAfterTransientProbeFailure(t *testing.T) {
 	defer ts.Close()
 
 	err := enqueueIfNeeded(context.Background(), ts.URL, repo.Dir, sha)
-	if err != nil {
-		t.Fatalf("enqueueIfNeeded: %v", err)
-	}
-	if enqueueCalls.Load() != 0 {
-		t.Fatalf("expected no fallback enqueue after transient probe failure, got %d", enqueueCalls.Load())
-	}
-	if jobsCalls.Load() < 2 {
-		t.Fatalf("expected a retrying probe sequence, got %d job checks", jobsCalls.Load())
-	}
+	require.NoError(t, err, "enqueueIfNeeded: %v")
+
+	assert.EqualValues(t, 0, enqueueCalls.Load())
+	assert.GreaterOrEqual(t, jobsCalls.Load(), int32(2))
 }
 
 func TestEnqueueIfNeededVerificationFailureReturnsErrorWithoutDuplicatePost(t *testing.T) {
@@ -1726,18 +1515,11 @@ func TestEnqueueIfNeededVerificationFailureReturnsErrorWithoutDuplicatePost(t *t
 	})
 
 	err := enqueueIfNeeded(context.Background(), startServer.URL, repo.Dir, sha)
-	if err == nil {
-		t.Fatal("expected verification error")
-	}
-	if !strings.Contains(err.Error(), "verify enqueue after retryable failure") {
-		t.Fatalf("expected verification error, got %v", err)
-	}
-	if firstPostCount.Load() != 1 {
-		t.Fatalf("expected one initial enqueue post, got %d", firstPostCount.Load())
-	}
-	if recoveryPostCount.Load() != 0 {
-		t.Fatalf("expected no duplicate enqueue post after verification failure, got %d", recoveryPostCount.Load())
-	}
+	require.Error(t, err)
+
+	require.Contains(t, err.Error(), "verify enqueue after retryable failure")
+	assert.EqualValues(t, 1, firstPostCount.Load())
+	assert.EqualValues(t, 0, recoveryPostCount.Load())
 }
 
 func TestEnqueueIfNeededDeadlineExceededCancelsProbeRequest(t *testing.T) {
@@ -1745,7 +1527,7 @@ func TestEnqueueIfNeededDeadlineExceededCancelsProbeRequest(t *testing.T) {
 	sha := repo.Run("rev-parse", "HEAD")
 
 	patchFixDaemonRetryForTest(t, func() error {
-		t.Fatal("enqueueIfNeeded should not attempt daemon recovery after request deadline exceeded")
+		require.Condition(t, func() bool { return false }, "enqueueIfNeeded should not attempt daemon recovery after request deadline exceeded")
 		return nil
 	})
 
@@ -1768,11 +1550,9 @@ func TestEnqueueIfNeededDeadlineExceededCancelsProbeRequest(t *testing.T) {
 
 	err := enqueueIfNeeded(ctx, ts.URL, repo.Dir, sha)
 	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("expected context deadline exceeded, got %v", err)
+		require.NoError(t, err, "expected context deadline exceeded, got %v")
 	}
-	if enqueueCalls.Load() != 0 {
-		t.Fatalf("expected no enqueue after canceled probe request, got %d", enqueueCalls.Load())
-	}
+	assert.EqualValues(t, 0, enqueueCalls.Load())
 }
 
 func TestEnqueueIfNeededRefreshesProbeAddressAfterConnectionError(t *testing.T) {
@@ -1814,39 +1594,31 @@ func TestEnqueueIfNeededRefreshesProbeAddressAfterConnectionError(t *testing.T) 
 	})
 
 	err := enqueueIfNeeded(context.Background(), "http://127.0.0.1:1", repo.Dir, sha)
-	if err != nil {
-		t.Fatalf("enqueueIfNeeded: %v", err)
-	}
+	require.NoError(t, err, "enqueueIfNeeded: %v")
+
 	if ensureCalls.Load() == 0 {
-		t.Fatal("expected probe to refresh daemon address after connection error")
+		require.NoError(t, err)
 	}
 	if jobsCalls.Load() == 0 {
-		t.Fatal("expected probe to hit refreshed daemon address")
+		require.NoError(t, err, "expected probe to hit refreshed daemon address")
 	}
-	if enqueueCalls.Load() != 0 {
-		t.Fatalf("expected no enqueue when refreshed probe found existing job, got %d", enqueueCalls.Load())
-	}
+	assert.EqualValues(t, 0, enqueueCalls.Load())
 }
 
 func TestHasJobForSHADoesNotTriggerDaemonRecovery(t *testing.T) {
 	patchFixDaemonRetryForTest(t, func() error {
-		t.Fatal("hasJobForSHA should not attempt daemon recovery")
-		return nil
+		return fmt.Errorf("hasJobForSHA should not attempt daemon recovery")
 	})
 
 	found, err := hasJobForSHA("http://127.0.0.1:1", "abc123def456")
-	if err == nil {
-		t.Fatal("expected connection error")
-	}
-	if found {
-		t.Fatal("expected no job match on connection failure")
-	}
+	require.Error(t, err)
+
+	assert.False(t, found, "expected no job match on connection failure")
 }
 
 func TestQueryOpenJobIDsDeadlineExceededCancelsRequest(t *testing.T) {
 	patchFixDaemonRetryForTest(t, func() error {
-		t.Fatal("queryOpenJobIDs should not attempt daemon recovery after request deadline exceeded")
-		return nil
+		return fmt.Errorf("queryOpenJobIDs should not attempt daemon recovery after request deadline exceeded")
 	})
 
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1867,7 +1639,7 @@ func TestQueryOpenJobIDsDeadlineExceededCancelsRequest(t *testing.T) {
 
 	_, err := queryOpenJobIDs(ctx, "/tmp/repo", "")
 	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("expected context deadline exceeded, got %v", err)
+		require.NoError(t, err, "expected context deadline exceeded, got %v")
 	}
 }
 
@@ -1897,48 +1669,24 @@ func TestRunFixList(t *testing.T) {
 		out, err := runWithOutput(t, repo.Dir, func(cmd *cobra.Command) error {
 			return runFixList(cmd, "", false)
 		})
-		if err != nil {
-			t.Fatalf("runFixList: %v", err)
-		}
+		require.NoError(t, err, "runFixList")
 
 		// Check header
-		if !strings.Contains(out, "Found 1 open job(s):") {
-			t.Errorf("expected header message, got:\n%s", out)
-		}
+		assert.Contains(t, out, "Found 1 open job(s):")
 
 		// Check job details are displayed
-		if !strings.Contains(out, "Job #42") {
-			t.Errorf("expected job ID, got:\n%s", out)
-		}
-		if !strings.Contains(out, "Git Ref:  abc123d") {
-			t.Errorf("expected git ref, got:\n%s", out)
-		}
-		if !strings.Contains(out, "Branch:   feature-branch") {
-			t.Errorf("expected branch, got:\n%s", out)
-		}
-		if !strings.Contains(out, "Subject:  Fix the widget") {
-			t.Errorf("expected subject, got:\n%s", out)
-		}
-		if !strings.Contains(out, "Agent:    claude-code") {
-			t.Errorf("expected agent, got:\n%s", out)
-		}
-		if !strings.Contains(out, "Model:    claude-3-opus") {
-			t.Errorf("expected model, got:\n%s", out)
-		}
-		if !strings.Contains(out, "Verdict:  FAIL") {
-			t.Errorf("expected verdict, got:\n%s", out)
-		}
-		if !strings.Contains(out, "Summary:  Found 3 issues:") {
-			t.Errorf("expected summary, got:\n%s", out)
-		}
+		assert.Contains(t, out, "Job #42")
+		assert.Contains(t, out, "Git Ref:  abc123d")
+		assert.Contains(t, out, "Branch:   feature-branch")
+		assert.Contains(t, out, "Subject:  Fix the widget")
+		assert.Contains(t, out, "Agent:    claude-code")
+		assert.Contains(t, out, "Model:    claude-3-opus")
+		assert.Contains(t, out, "Verdict:  FAIL")
+		assert.Contains(t, out, "Summary:  Found 3 issues:")
 
 		// Check usage hints
-		if !strings.Contains(out, "roborev fix <job_id>") {
-			t.Errorf("expected usage hint, got:\n%s", out)
-		}
-		if !strings.Contains(out, "roborev fix --open") {
-			t.Errorf("expected open hint, got:\n%s", out)
-		}
+		assert.Contains(t, out, "roborev fix <job_id>")
+		assert.Contains(t, out, "roborev fix --open")
 	})
 
 	t.Run("no open jobs", func(t *testing.T) {
@@ -1949,13 +1697,9 @@ func TestRunFixList(t *testing.T) {
 		out, err := runWithOutput(t, repo.Dir, func(cmd *cobra.Command) error {
 			return runFixList(cmd, "", false)
 		})
-		if err != nil {
-			t.Fatalf("runFixList: %v", err)
-		}
+		require.NoError(t, err, "runFixList")
 
-		if !strings.Contains(out, "No open jobs found") {
-			t.Errorf("expected no jobs message, got:\n%s", out)
-		}
+		assert.Contains(t, out, "No open jobs found")
 	})
 
 	t.Run("respects newest-first flag", func(t *testing.T) {
@@ -1994,16 +1738,10 @@ func TestRunFixList(t *testing.T) {
 		_, err := runWithOutput(t, repo.Dir, func(cmd *cobra.Command) error {
 			return runFixList(cmd, "", true)
 		})
-		if err != nil {
-			t.Fatalf("runFixList: %v", err)
-		}
+		require.NoError(t, err, "runFixList: %v")
 
-		if len(gotIDs) != 3 {
-			t.Fatalf("expected 3 job fetches, got %d", len(gotIDs))
-		}
-		if gotIDs[0] != 30 || gotIDs[1] != 20 || gotIDs[2] != 10 {
-			t.Errorf("expected newest-first order [30, 20, 10], got %v", gotIDs)
-		}
+		assert.Len(t, gotIDs, 3)
+		assert.False(t, gotIDs[0] != 30 || gotIDs[1] != 20 || gotIDs[2] != 10)
 	})
 }
 func TestTruncateString(t *testing.T) {
@@ -2032,9 +1770,7 @@ func TestTruncateString(t *testing.T) {
 
 	for _, tt := range tests {
 		got := truncateString(tt.s, tt.maxLen)
-		if got != tt.want {
-			t.Errorf("truncateString(%q, %d) = %q, want %q", tt.s, tt.maxLen, got, tt.want)
-		}
+		assert.Equal(t, tt.want, got)
 	}
 }
 
@@ -2078,15 +1814,11 @@ func TestFixWorktreeRepoResolution(t *testing.T) {
 		var buf bytes.Buffer
 		cmd.SetOut(&buf)
 		if err := runFixList(cmd, "", false); err != nil {
-			t.Fatalf("runFixList: %v", err)
+			require.NoError(t, err, "runFixList: %v")
 		}
 
-		if *receivedRepo == "" {
-			t.Fatal("expected repo param to be sent")
-		}
-		if *receivedRepo != repo.Dir {
-			t.Errorf("expected main repo path %q, got %q", repo.Dir, *receivedRepo)
-		}
+		require.NotEmpty(t, *receivedRepo, "expected repo param to be sent")
+		assert.Equal(t, *receivedRepo, repo.Dir)
 	})
 
 	t.Run("runFixOpen sends main repo path", func(t *testing.T) {
@@ -2099,15 +1831,11 @@ func TestFixWorktreeRepoResolution(t *testing.T) {
 		cmd.SetOut(&buf)
 		opts := fixOptions{quiet: true}
 		if err := runFixOpen(cmd, "", false, opts); err != nil {
-			t.Fatalf("runFixOpen: %v", err)
+			require.NoError(t, err, "runFixOpen: %v")
 		}
 
-		if *receivedRepo == "" {
-			t.Fatal("expected repo param to be sent")
-		}
-		if *receivedRepo != repo.Dir {
-			t.Errorf("expected main repo path %q, got %q", repo.Dir, *receivedRepo)
-		}
+		require.NotEmpty(t, *receivedRepo, "expected repo param to be sent")
+		assert.Equal(t, *receivedRepo, repo.Dir)
 	})
 
 	t.Run("runFixBatch sends main repo path", func(t *testing.T) {
@@ -2121,15 +1849,11 @@ func TestFixWorktreeRepoResolution(t *testing.T) {
 		opts := fixOptions{quiet: true}
 		// nil jobIDs triggers discovery via queryOpenJobs
 		if err := runFixBatch(cmd, nil, "", false, opts); err != nil {
-			t.Fatalf("runFixBatch: %v", err)
+			require.NoError(t, err, "runFixBatch: %v")
 		}
 
-		if *receivedRepo == "" {
-			t.Fatal("expected repo param to be sent")
-		}
-		if *receivedRepo != repo.Dir {
-			t.Errorf("expected main repo path %q, got %q", repo.Dir, *receivedRepo)
-		}
+		require.NotEmpty(t, *receivedRepo, "expected repo param to be sent")
+		assert.Equal(t, *receivedRepo, repo.Dir)
 	})
 }
 
@@ -2175,9 +1899,7 @@ func TestJobVerdict(t *testing.T) {
 			job := &storage.ReviewJob{Verdict: tt.verdict}
 			review := &storage.Review{Output: tt.output}
 			got := jobVerdict(job, review)
-			if got != tt.want {
-				t.Errorf("jobVerdict() = %q, want %q", got, tt.want)
-			}
+			assert.Equal(t, tt.want, got)
 		})
 	}
 }
@@ -2242,20 +1964,12 @@ func TestFixSingleJobSkipsPassVerdict(t *testing.T) {
 	opts := fixOptions{agentName: "test-pass-skip"}
 
 	err := fixSingleJob(cmd, repo.Dir, 99, opts)
-	if err != nil {
-		t.Fatalf("fixSingleJob: %v", err)
-	}
+	require.NoError(t, err, "fixSingleJob")
 
 	outputStr := output.String()
-	if !strings.Contains(outputStr, "review passed, skipping fix") {
-		t.Errorf("expected skip message, got:\n%s", outputStr)
-	}
-	if agentCalled.Load() != 0 {
-		t.Error("agent should not have been invoked for passing review")
-	}
-	if closeCalls.Load() != 1 {
-		t.Errorf("expected 1 close call, got %d", closeCalls.Load())
-	}
+	assert.Contains(t, outputStr, "review passed, skipping fix")
+	assert.EqualValues(t, 0, agentCalled.Load())
+	assert.EqualValues(t, 1, closeCalls.Load())
 }
 
 func TestFixBatchSkipsPassVerdict(t *testing.T) {
@@ -2334,25 +2048,17 @@ func TestFixBatchSkipsPassVerdict(t *testing.T) {
 			fixOptions{agentName: "test", reasoning: "fast"},
 		)
 	})
-	if err != nil {
-		t.Fatalf("runFixBatch: %v", err)
-	}
+	require.NoError(t, err, "runFixBatch: %v")
 
-	if !strings.Contains(out, "Skipping job 10 (review passed)") {
-		t.Errorf("expected skip message for job 10, got:\n%s", out)
-	}
+	assert.Contains(t, out, "Skipping job 10 (review passed)")
 	// Job 20 (FAIL) should be processed — its findings should appear
-	if !strings.Contains(out, "Bug in foo.go") {
-		t.Errorf("expected FAIL job findings in output, got:\n%s", out)
-	}
+	assert.Contains(t, out, "Bug in foo.go")
 
 	// Verify PASS job 10 was closed during the skip phase
 	mu.Lock()
 	ids := closedJobIDs
 	mu.Unlock()
-	if !slices.Contains(ids, int64(10)) {
-		t.Errorf("expected job 10 to be closed, got IDs: %v", ids)
-	}
+	assert.True(t, slices.Contains(ids, int64(10)))
 }
 
 func setupFixErrorMockDaemon(t *testing.T, processedJobs *[]int64, mu *sync.Mutex) {
@@ -2417,21 +2123,14 @@ func TestRunFixWithSeenExplicitAbortsOnError(t *testing.T) {
 			reasoning: "fast",
 		}, nil)
 	})
-
-	if err == nil {
-		t.Fatal("expected error for explicit job IDs, got nil")
-	}
-	if !strings.Contains(err.Error(), "error fixing job 20") {
-		t.Errorf("error should mention job 20, got: %v", err)
-	}
+	require.Error(t, err, "expected error for explicit job IDs")
+	assert.Contains(t, err.Error(), "error fixing job 20")
 
 	// Job 30 should NOT be processed (abort on explicit failure)
 	mu.Lock()
 	jobs := processedJobs
 	mu.Unlock()
-	if slices.Contains(jobs, int64(30)) {
-		t.Errorf("job 30 should not be processed after job 20 fails, got: %v", jobs)
-	}
+	assert.False(t, slices.Contains(jobs, int64(30)))
 }
 
 func TestRunFixWithSeenDiscoveryContinuesOnError(t *testing.T) {
@@ -2451,26 +2150,18 @@ func TestRunFixWithSeenDiscoveryContinuesOnError(t *testing.T) {
 		}, seen)
 	})
 
-	if err != nil {
-		t.Fatalf("expected no error in discovery mode, got: %v", err)
-	}
+	require.NoError(t, err, "runFixWithSeen")
 
-	if !strings.Contains(out, "Warning: error fixing job 20") {
-		t.Errorf("expected warning about job 20, got:\n%s", out)
-	}
+	assert.Contains(t, out, "Warning: error fixing job 20")
 
 	// All three jobs should be attempted
 	mu.Lock()
 	jobs := processedJobs
 	mu.Unlock()
-	if !slices.Contains(jobs, int64(30)) {
-		t.Errorf("job 30 should be processed in discovery mode, got: %v", jobs)
-	}
+	assert.True(t, slices.Contains(jobs, int64(30)))
 
 	// Failed job should be marked as seen
-	if !seen[20] {
-		t.Error("job 20 should be marked as seen even after failure")
-	}
+	assert.True(t, seen[20])
 }
 
 func TestRunFixWithSeenDiscoveryAbortsOnConnectionError(t *testing.T) {
@@ -2502,15 +2193,11 @@ func TestRunFixWithSeenDiscoveryAbortsOnConnectionError(t *testing.T) {
 		}, seen)
 	})
 
-	if err == nil {
-		t.Fatal("expected connection error in discovery mode")
-	}
+	require.Error(t, err, "expected connection error in discovery mode")
 	if !strings.Contains(err.Error(), "daemon connection lost") {
-		t.Fatalf("expected daemon connection lost error, got: %v", err)
+		require.NoError(t, err)
 	}
-	if len(seen) != 0 {
-		t.Fatalf("expected no jobs marked as seen after connection failure, got: %v", seen)
-	}
+	assert.Empty(t, seen)
 }
 
 func TestResolveFixAgentSkipsDefaultModel(t *testing.T) {
@@ -2526,7 +2213,7 @@ func TestResolveFixAgentSkipsDefaultModel(t *testing.T) {
 default_agent = "codex"
 default_model = "gpt-5.4"
 `), 0644); err != nil {
-		t.Fatal(err)
+		require.NoError(t, err)
 	}
 
 	tests := []struct {
@@ -2564,23 +2251,17 @@ default_model = "gpt-5.4"
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg, err := config.LoadGlobal()
-			if err != nil {
-				t.Fatalf("LoadGlobal: %v", err)
-			}
+			require.NoError(t, err, "LoadGlobal: %v")
 
 			modelStr := resolveFixModel(
 				tt.agentName, tt.model, tmpDir, cfg, "fast",
 			)
 
 			if tt.wantModel && modelStr == "" {
-				t.Errorf("expected model to be set, got empty")
+				assert.False(t, tt.wantModel && modelStr == "", "expected model to be set, got empty")
 			}
-			if !tt.wantModel && modelStr != "" {
-				t.Errorf("expected model to be empty, got %q", modelStr)
-			}
-			if tt.model != "" && modelStr != tt.model {
-				t.Errorf("expected model %q, got %q", tt.model, modelStr)
-			}
+			assert.False(t, !tt.wantModel && modelStr != "")
+			assert.False(t, tt.model != "" && modelStr != tt.model)
 		})
 	}
 }
@@ -2599,32 +2280,27 @@ default_agent = "codex"
 default_model = "gpt-5.4"
 fix_model = "gemini-2.5-pro"
 `), 0644); err != nil {
-		t.Fatal(err)
+		require.NoError(t, err)
 	}
 
 	cfg, err := config.LoadGlobal()
-	if err != nil {
-		t.Fatalf("LoadGlobal: %v", err)
-	}
+	require.NoError(t, err, "LoadGlobal: %v")
 
 	// With CLI --agent override, fix_model should still apply
 	modelStr := config.ResolveWorkflowModel(tmpDir, cfg, "fix", "fast")
-	if modelStr != "gemini-2.5-pro" {
-		t.Errorf(
-			"expected workflow-specific model 'gemini-2.5-pro', got %q",
-			modelStr,
-		)
-	}
+	assert.Equal(t, "gemini-2.5-pro", modelStr,
+
+		"expected workflow-specific model 'gemini-2.5-pro', got %q",
+		modelStr)
 
 	// Without CLI --agent, ResolveModelForWorkflow should return
 	// fix_model (higher priority than default_model)
 	modelStr = config.ResolveModelForWorkflow("", tmpDir, cfg, "fix", "fast")
-	if modelStr != "gemini-2.5-pro" {
-		t.Errorf(
-			"expected workflow-specific model 'gemini-2.5-pro', got %q",
-			modelStr,
-		)
-	}
+	assert.Equal(t, "gemini-2.5-pro", modelStr,
+
+		"expected workflow-specific model 'gemini-2.5-pro', got %q",
+		modelStr)
+
 }
 
 func TestResolveFixAgentSkipsDefaultModelForConfiguredFixAgent(t *testing.T) {
@@ -2640,18 +2316,14 @@ default_agent = "codex"
 default_model = "gpt-5.4"
 fix_agent = "claude"
 `), 0644); err != nil {
-		t.Fatal(err)
+		require.NoError(t, err)
 	}
 
 	cfg, err := config.LoadGlobal()
-	if err != nil {
-		t.Fatalf("LoadGlobal: %v", err)
-	}
+	require.NoError(t, err, "LoadGlobal: %v")
 
 	modelStr := resolveFixModel("claude-code", "", tmpDir, cfg, "standard")
-	if modelStr != "" {
-		t.Fatalf("expected empty model so claude keeps its default, got %q", modelStr)
-	}
+	assert.Empty(t, modelStr)
 }
 
 func TestResolveFixAgentFallbackUsesDefaultModelForActualAgent(t *testing.T) {
@@ -2666,21 +2338,15 @@ default_agent = "codex"
 default_model = "gpt-5.4"
 fix_agent = "claude"
 `), 0644); err != nil {
-		t.Fatal(err)
+		require.NoError(t, err)
 	}
 
 	selected, err := resolveFixAgent(tmpDir, fixOptions{})
-	if err != nil {
-		t.Fatalf("resolveFixAgent: %v", err)
-	}
+	require.NoError(t, err, "resolveFixAgent: %v")
 
 	codexAgent, ok := selected.(*agent.CodexAgent)
-	if !ok {
-		t.Fatalf("expected codex fallback agent, got %T", selected)
-	}
-	if codexAgent.Model != "gpt-5.4" {
-		t.Fatalf("expected fallback codex agent to use default_model, got %q", codexAgent.Model)
-	}
+	assert.True(t, ok)
+	assert.Equal(t, "gpt-5.4", codexAgent.Model)
 }
 
 func TestResolveFixAgentUsesRepoWorkflowModel(t *testing.T) {
@@ -2696,7 +2362,7 @@ func TestResolveFixAgentUsesRepoWorkflowModel(t *testing.T) {
 default_agent = "codex"
 default_model = "gpt-5.4"
 `), 0644); err != nil {
-		t.Fatal(err)
+		require.NoError(t, err)
 	}
 
 	// Write repo config with fix_model_fast
@@ -2705,38 +2371,33 @@ default_model = "gpt-5.4"
 	if err := os.WriteFile(repoConfigPath, []byte(`
 fix_model_fast = "claude-sonnet"
 `), 0644); err != nil {
-		t.Fatal(err)
+		require.NoError(t, err)
 	}
 
 	cfg, err := config.LoadGlobal()
-	if err != nil {
-		t.Fatalf("LoadGlobal: %v", err)
-	}
+	require.NoError(t, err, "LoadGlobal: %v")
 
 	// With CLI --agent override, repo fix_model_fast should apply
 	modelStr := config.ResolveWorkflowModel(repoDir, cfg, "fix", "fast")
-	if modelStr != "claude-sonnet" {
-		t.Errorf(
-			"expected repo workflow model 'claude-sonnet', got %q",
-			modelStr,
-		)
-	}
+	assert.Equal(t, "claude-sonnet", modelStr,
+
+		"expected repo workflow model 'claude-sonnet', got %q",
+		modelStr)
 
 	// Repo generic model should NOT be used
 	repoConfigPath2 := filepath.Join(repoDir, ".roborev.toml")
 	if err := os.WriteFile(repoConfigPath2, []byte(`
 model = "repo-default"
 `), 0644); err != nil {
-		t.Fatal(err)
+		require.NoError(t, err)
 	}
 
 	modelStr = config.ResolveWorkflowModel(repoDir, cfg, "fix", "fast")
-	if modelStr != "" {
-		t.Errorf(
-			"expected empty model (repo generic should be skipped), got %q",
-			modelStr,
-		)
-	}
+	assert.Empty(t, modelStr,
+
+		"expected empty model (repo generic should be skipped), got %q",
+		modelStr)
+
 }
 
 func TestResolveFixAgentSameAsDefault(t *testing.T) {
@@ -2781,19 +2442,15 @@ func TestResolveFixAgentSameAsDefault(t *testing.T) {
 				tt.defaultAgent,
 			)
 			if err := os.WriteFile(cfgPath, []byte(cfgContent), 0644); err != nil {
-				t.Fatal(err)
+				require.NoError(t, err)
 			}
 			cfg, err := config.LoadGlobal()
-			if err != nil {
-				t.Fatalf("LoadGlobal: %v", err)
-			}
+			require.NoError(t, err, "LoadGlobal: %v")
 
 			// Call the production resolveFixModel function directly
 			modelStr := resolveFixModel(tt.cliAgent, "", tmpDir, cfg, "fast")
 
-			if modelStr != tt.wantModel {
-				t.Errorf("model = %q, want %q", modelStr, tt.wantModel)
-			}
+			assert.Equal(t, tt.wantModel, modelStr)
 		})
 	}
 }
@@ -2804,30 +2461,42 @@ func TestBuildGenericFixPromptMinSeverity(t *testing.T) {
 	t.Run("no filter", func(t *testing.T) {
 		p := buildGenericFixPrompt(output, "")
 		if strings.Contains(p, "Severity filter") {
-			t.Error("empty minSeverity should not inject filter")
+			assert.Condition(t, func() bool {
+				return false
+			}, "empty minSeverity should not inject filter")
 		}
 		if !strings.Contains(p, output) {
-			t.Error("prompt should contain the analysis output")
+			assert.Condition(t, func() bool {
+				return false
+			}, "prompt should contain the analysis output")
 		}
 	})
 
 	t.Run("high filter", func(t *testing.T) {
 		p := buildGenericFixPrompt(output, "high")
 		if !strings.Contains(p, "Severity filter") {
-			t.Error("high minSeverity should inject filter")
+			assert.Condition(t, func() bool {
+				return false
+			}, "high minSeverity should inject filter")
 		}
 		if !strings.Contains(p, "High and Critical") {
-			t.Error("instruction should mention High and Critical")
+			assert.Condition(t, func() bool {
+				return false
+			}, "instruction should mention High and Critical")
 		}
 		if !strings.Contains(p, output) {
-			t.Error("prompt should still contain the analysis output")
+			assert.Condition(t, func() bool {
+				return false
+			}, "prompt should still contain the analysis output")
 		}
 	})
 
 	t.Run("low filter is no-op", func(t *testing.T) {
 		p := buildGenericFixPrompt(output, "low")
 		if strings.Contains(p, "Severity filter") {
-			t.Error("low minSeverity should not inject filter")
+			assert.Condition(t, func() bool {
+				return false
+			}, "low minSeverity should not inject filter")
 		}
 	})
 }
@@ -2844,17 +2513,23 @@ func TestBuildBatchFixPromptMinSeverity(t *testing.T) {
 	t.Run("no filter", func(t *testing.T) {
 		p := buildBatchFixPrompt(entries, "")
 		if strings.Contains(p, "Severity filter") {
-			t.Error("empty minSeverity should not inject filter")
+			assert.Condition(t, func() bool {
+				return false
+			}, "empty minSeverity should not inject filter")
 		}
 	})
 
 	t.Run("critical filter", func(t *testing.T) {
 		p := buildBatchFixPrompt(entries, "critical")
 		if !strings.Contains(p, "Severity filter") {
-			t.Error("critical minSeverity should inject filter")
+			assert.Condition(t, func() bool {
+				return false
+			}, "critical minSeverity should inject filter")
 		}
 		if !strings.Contains(p, "Only include Critical") {
-			t.Error("instruction should mention Critical only")
+			assert.Condition(t, func() bool {
+				return false
+			}, "instruction should mention Critical only")
 		}
 	})
 }

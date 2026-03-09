@@ -11,6 +11,8 @@ import (
 	"testing"
 
 	"github.com/roborev-dev/roborev/internal/testutil"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 const (
@@ -24,36 +26,23 @@ func TestGeneratePostCommit(t *testing.T) {
 	lines := strings.Split(content, "\n")
 
 	t.Run("has shebang", func(t *testing.T) {
-		if !strings.HasPrefix(content, shebang) {
-			t.Error("hook should start with #!/bin/sh")
-		}
+		assert.True(t, strings.HasPrefix(content, shebang), "hook should start with #!/bin/sh")
 	})
 
 	t.Run("has roborev comment", func(t *testing.T) {
-		if !strings.Contains(content, "# roborev") {
-			t.Error("hook should contain roborev comment")
-		}
+		assert.Contains(t, content, "# roborev", "hook should contain roborev comment")
 	})
 
 	t.Run("baked path comes first", func(t *testing.T) {
 		bakedIdx := strings.Index(content, "ROBOREV=\"")
 		pathIdx := strings.Index(content, "command -v roborev")
-
-		if bakedIdx == -1 {
-			t.Error("hook should have baked ROBOREV= assignment")
-		}
-		if pathIdx == -1 {
-			t.Error("hook should have PATH fallback")
-		}
-		if bakedIdx > pathIdx {
-			t.Error("baked path should come before PATH lookup")
-		}
+		assert.NotEqual(t, -1, bakedIdx, "hook should have baked ROBOREV= assignment")
+		assert.NotEqual(t, -1, pathIdx, "hook should have PATH fallback")
+		assert.Less(t, bakedIdx, pathIdx, "baked path should come before PATH lookup")
 	})
 
 	t.Run("post-commit line without background", func(t *testing.T) {
-		if !strings.Contains(content, "post-commit") || !strings.Contains(content, "2>/dev/null") {
-			t.Error("hook should call post-commit with 2>/dev/null")
-		}
+		require.True(t, strings.Contains(content, "post-commit") && strings.Contains(content, "2>/dev/null"), "hook should call post-commit with 2>/dev/null")
 
 		idx := strings.Index(content, "\" post-commit")
 		if idx != -1 {
@@ -62,31 +51,19 @@ func TestGeneratePostCommit(t *testing.T) {
 				lineEnd = len(content[idx:])
 			}
 			line := strings.TrimSpace(content[idx : idx+lineEnd])
-			if strings.HasSuffix(line, "&") {
-				t.Error("post-commit line should not have trailing &")
-			}
+			assert.False(t, strings.HasSuffix(line, "&"), "post-commit line should not have trailing &")
 		}
 	})
 
 	t.Run("has version marker", func(t *testing.T) {
-		if !strings.Contains(content, PostCommitVersionMarker) {
-			t.Errorf(
-				"hook should contain %q",
-				PostCommitVersionMarker,
-			)
-		}
+		assert.Contains(t, content, PostCommitVersionMarker, "hook should contain %q", PostCommitVersionMarker)
 	})
 
 	t.Run("baked path is quoted", func(t *testing.T) {
 		for _, line := range lines {
 			if strings.HasPrefix(line, "ROBOREV=") &&
 				!strings.Contains(line, "command -v") {
-				if !strings.Contains(line, `ROBOREV="`) {
-					t.Errorf(
-						"baked path should be quoted: %s",
-						line,
-					)
-				}
+				assert.Contains(t, line, `ROBOREV="`, "baked path should be quoted: %s", line)
 				break
 			}
 		}
@@ -100,12 +77,7 @@ func TestGeneratePostCommit(t *testing.T) {
 				end := strings.LastIndex(line, `"`)
 				if start != -1 && end > start {
 					path := line[start+1 : end]
-					if !filepath.IsAbs(path) {
-						t.Errorf(
-							"baked path should be absolute: %s",
-							path,
-						)
-					}
+					assert.True(t, filepath.IsAbs(path), "baked path should be absolute: %s", path)
 				}
 				break
 			}
@@ -115,66 +87,53 @@ func TestGeneratePostCommit(t *testing.T) {
 
 func TestGeneratePostRewrite(t *testing.T) {
 	content := GeneratePostRewrite()
-
-	if !strings.HasPrefix(content, shebang) {
-		t.Error("hook should start with #!/bin/sh")
-	}
-	if !strings.Contains(content, PostRewriteVersionMarker) {
-		t.Error("hook should contain version marker")
-	}
-	if !strings.Contains(content, "remap --quiet") {
-		t.Error("hook should call remap --quiet")
-	}
+	assert.True(t, strings.HasPrefix(content, shebang), "hook should start with #!/bin/sh")
+	assert.Contains(t, content, PostRewriteVersionMarker, "hook should contain version marker")
+	assert.Contains(t, content, "remap --quiet", "hook should call remap --quiet")
 }
 
 func TestGenerateEmbeddablePostCommit(t *testing.T) {
 	content := generateEmbeddablePostCommit()
-
-	if strings.HasPrefix(content, "#!") {
-		t.Error("embeddable should not have shebang")
-	}
-	if !strings.Contains(content, "_roborev_hook() {") {
-		t.Error("embeddable should use function wrapper")
-	}
-	if !strings.Contains(content, "return 0") {
-		t.Error("embeddable should use return, not exit")
-	}
-	if strings.Contains(content, "exit 0") {
-		t.Error("embeddable must not use exit 0")
-	}
-	if !strings.Contains(content, PostCommitVersionMarker) {
-		t.Error("embeddable should contain version marker")
-	}
+	assert.False(t, strings.HasPrefix(content, "#!"), "embeddable should not have shebang")
+	assert.Contains(t, content, "_roborev_hook() {", "embeddable should use function wrapper")
+	assert.Contains(t, content, "return 0", "embeddable should use return, not exit")
+	assert.NotContains(t, content, "exit 0", "embeddable must not use exit 0")
+	assert.Contains(t, content, PostCommitVersionMarker, "embeddable should contain version marker")
 	// Ends with function call
 	lines := strings.Split(
 		strings.TrimRight(content, "\n"), "\n",
 	)
 	last := strings.TrimSpace(lines[len(lines)-1])
-	if last != "_roborev_hook" {
-		t.Errorf(
-			"embeddable should end with function call, got: %s",
-			last,
-		)
-	}
+	assert.Equal(t, "_roborev_hook", last, "embeddable should end with function call, got: %s", last)
 }
 
 func TestGenerateEmbeddablePostRewrite(t *testing.T) {
 	content := generateEmbeddablePostRewrite()
 
 	if strings.HasPrefix(content, "#!") {
-		t.Error("embeddable should not have shebang")
+		assert.Condition(t, func() bool {
+			return false
+		}, "embeddable should not have shebang")
 	}
 	if !strings.Contains(content, "_roborev_remap() {") {
-		t.Error("embeddable should use function wrapper")
+		assert.Condition(t, func() bool {
+			return false
+		}, "embeddable should use function wrapper")
 	}
 	if !strings.Contains(content, "return 0") {
-		t.Error("embeddable should use return, not exit")
+		assert.Condition(t, func() bool {
+			return false
+		}, "embeddable should use return, not exit")
 	}
 	if strings.Contains(content, "exit 0") {
-		t.Error("embeddable must not use exit 0")
+		assert.Condition(t, func() bool {
+			return false
+		}, "embeddable must not use exit 0")
 	}
 	if !strings.Contains(content, PostRewriteVersionMarker) {
-		t.Error("embeddable should contain version marker")
+		assert.Condition(t, func() bool {
+			return false
+		}, "embeddable should contain version marker")
 	}
 }
 
@@ -184,18 +143,23 @@ func TestEmbedSnippet(t *testing.T) {
 		snippet := "# roborev snippet\n_roborev_hook\n"
 		result := embedSnippet(existing, snippet)
 		if !strings.HasPrefix(result, shebang) {
-			t.Error("should preserve shebang")
+			assert.Condition(t, func() bool {
+				return false
+			}, "should preserve shebang")
 		}
 		shebangEnd := strings.Index(result, "\n") + 1
 		afterShebang := result[shebangEnd:]
 		if !strings.HasPrefix(afterShebang, "# roborev snippet") {
-			t.Errorf(
-				"snippet should come right after shebang, got:\n%s",
-				result,
-			)
+			assert.Condition(t, func() bool {
+				return false
+			}, "snippet should come right after shebang, got:\n%s",
+				result)
+
 		}
 		if !strings.Contains(result, "echo 'user code'") {
-			t.Error("user code should be preserved")
+			assert.Condition(t, func() bool {
+				return false
+			}, "user code should be preserved")
 		}
 	})
 
@@ -206,7 +170,9 @@ func TestEmbedSnippet(t *testing.T) {
 		snippetIdx := strings.Index(result, "SNIPPET")
 		exitIdx := strings.Index(result, "exit 0")
 		if snippetIdx > exitIdx {
-			t.Error("snippet should appear before exit 0")
+			assert.Condition(t, func() bool {
+				return false
+			}, "snippet should appear before exit 0")
 		}
 	})
 
@@ -215,10 +181,11 @@ func TestEmbedSnippet(t *testing.T) {
 		snippet := "SNIPPET\n"
 		result := embedSnippet(existing, snippet)
 		if !strings.HasPrefix(result, "SNIPPET\n") {
-			t.Errorf(
-				"snippet should be prepended, got:\n%s",
-				result,
-			)
+			assert.Condition(t, func() bool {
+				return false
+			}, "snippet should be prepended, got:\n%s",
+				result)
+
 		}
 	})
 
@@ -227,13 +194,16 @@ func TestEmbedSnippet(t *testing.T) {
 		snippet := "SNIPPET\n"
 		result := embedSnippet(existing, snippet)
 		if !strings.HasPrefix(result, shebang) {
-			t.Errorf(
-				"shebang should get trailing newline, got:\n%q",
-				result,
-			)
+			assert.Condition(t, func() bool {
+				return false
+			}, "shebang should get trailing newline, got:\n%q",
+				result)
+
 		}
 		if !strings.Contains(result, "SNIPPET") {
-			t.Error("snippet should be present")
+			assert.Condition(t, func() bool {
+				return false
+			}, "snippet should be present")
 		}
 	})
 }
@@ -248,7 +218,9 @@ func TestNeedsUpgrade(t *testing.T) {
 		if !NeedsUpgrade(
 			repo.Root, hookPostCommit, PostCommitVersionMarker,
 		) {
-			t.Error("should detect outdated hook")
+			assert.Condition(t, func() bool {
+				return false
+			}, "should detect outdated hook")
 		}
 	})
 
@@ -262,7 +234,9 @@ func TestNeedsUpgrade(t *testing.T) {
 		if NeedsUpgrade(
 			repo.Root, hookPostCommit, PostCommitVersionMarker,
 		) {
-			t.Error("should not flag current hook")
+			assert.Condition(t, func() bool {
+				return false
+			}, "should not flag current hook")
 		}
 	})
 
@@ -271,7 +245,9 @@ func TestNeedsUpgrade(t *testing.T) {
 		if NeedsUpgrade(
 			repo.Root, hookPostCommit, PostCommitVersionMarker,
 		) {
-			t.Error("should not flag missing hook")
+			assert.Condition(t, func() bool {
+				return false
+			}, "should not flag missing hook")
 		}
 	})
 
@@ -281,7 +257,9 @@ func TestNeedsUpgrade(t *testing.T) {
 		if NeedsUpgrade(
 			repo.Root, hookPostCommit, PostCommitVersionMarker,
 		) {
-			t.Error("should not flag non-roborev hook")
+			assert.Condition(t, func() bool {
+				return false
+			}, "should not flag non-roborev hook")
 		}
 	})
 
@@ -297,7 +275,9 @@ func TestNeedsUpgrade(t *testing.T) {
 			repo.Root, hookPostRewrite,
 			PostRewriteVersionMarker,
 		) {
-			t.Error("should detect outdated post-rewrite hook")
+			assert.Condition(t, func() bool {
+				return false
+			}, "should detect outdated post-rewrite hook")
 		}
 	})
 
@@ -314,7 +294,9 @@ func TestNeedsUpgrade(t *testing.T) {
 			repo.Root, hookPostRewrite,
 			PostRewriteVersionMarker,
 		) {
-			t.Error("should not flag current post-rewrite hook")
+			assert.Condition(t, func() bool {
+				return false
+			}, "should not flag current post-rewrite hook")
 		}
 	})
 }
@@ -323,7 +305,9 @@ func TestNotInstalled(t *testing.T) {
 	t.Run("hook file absent", func(t *testing.T) {
 		repo := testutil.NewTestRepo(t)
 		if !NotInstalled(repo.Root, hookPostCommit) {
-			t.Error("absent hook should be not installed")
+			assert.Condition(t, func() bool {
+				return false
+			}, "absent hook should be not installed")
 		}
 	})
 
@@ -331,7 +315,9 @@ func TestNotInstalled(t *testing.T) {
 		repo := testutil.NewTestRepo(t)
 		repo.WriteHook("#!/bin/sh\necho hello\n")
 		if !NotInstalled(repo.Root, hookPostCommit) {
-			t.Error("non-roborev hook should be not installed")
+			assert.Condition(t, func() bool {
+				return false
+			}, "non-roborev hook should be not installed")
 		}
 	})
 
@@ -339,7 +325,9 @@ func TestNotInstalled(t *testing.T) {
 		repo := testutil.NewTestRepo(t)
 		repo.WriteHook(GeneratePostCommit())
 		if NotInstalled(repo.Root, hookPostCommit) {
-			t.Error("roborev hook should be installed")
+			assert.Condition(t, func() bool {
+				return false
+			}, "roborev hook should be installed")
 		}
 	})
 
@@ -353,10 +341,11 @@ func TestNotInstalled(t *testing.T) {
 			)
 			os.MkdirAll(hookPath, 0755)
 			if NotInstalled(repo.Root, hookPostCommit) {
-				t.Error(
-					"non-ENOENT error should not report " +
-						"as not installed",
-				)
+				assert.Condition(t, func() bool {
+					return false
+				}, "non-ENOENT error should not report "+
+					"as not installed")
+
 			}
 		},
 	)
@@ -372,7 +361,9 @@ func TestMissing(t *testing.T) {
 					"roborev enqueue\n",
 			)
 			if !Missing(repo.Root, hookPostRewrite) {
-				t.Error("should detect missing post-rewrite")
+				assert.Condition(t, func() bool {
+					return false
+				}, "should detect missing post-rewrite")
 			}
 		},
 	)
@@ -380,7 +371,9 @@ func TestMissing(t *testing.T) {
 	t.Run("no post-commit hook at all", func(t *testing.T) {
 		repo := testutil.NewTestRepo(t)
 		if Missing(repo.Root, hookPostRewrite) {
-			t.Error("should not warn without post-commit")
+			assert.Condition(t, func() bool {
+				return false
+			}, "should not warn without post-commit")
 		}
 	})
 
@@ -400,7 +393,9 @@ func TestMissing(t *testing.T) {
 			0755,
 		)
 		if Missing(repo.Root, hookPostRewrite) {
-			t.Error("should not warn when present")
+			assert.Condition(t, func() bool {
+				return false
+			}, "should not warn when present")
 		}
 	})
 
@@ -408,7 +403,9 @@ func TestMissing(t *testing.T) {
 		repo := testutil.NewTestRepo(t)
 		repo.WriteHook("#!/bin/sh\necho hello\n")
 		if Missing(repo.Root, hookPostRewrite) {
-			t.Error("should not warn for non-roborev")
+			assert.Condition(t, func() bool {
+				return false
+			}, "should not warn for non-roborev")
 		}
 	})
 
@@ -430,9 +427,10 @@ func TestMissing(t *testing.T) {
 			)
 			os.MkdirAll(prPath, 0755)
 			if Missing(repo.Root, hookPostRewrite) {
-				t.Error(
-					"non-ENOENT error should return false",
-				)
+				assert.Condition(t, func() bool {
+					return false
+				}, "non-ENOENT error should return false")
+
 			}
 		},
 	)
@@ -554,7 +552,9 @@ func TestInstall(t *testing.T) {
 
 			if tc.initialContent != "" {
 				if err := os.WriteFile(hookPath, []byte(tc.initialContent), 0755); err != nil {
-					t.Fatal(err)
+					require.Condition(t, func() bool {
+						return false
+					}, err)
 				}
 			}
 
@@ -562,13 +562,19 @@ func TestInstall(t *testing.T) {
 
 			if tc.expectedError != nil {
 				if err == nil {
-					t.Fatal("expected error, got nil")
+					require.Condition(t, func() bool {
+						return false
+					}, "expected error, got nil")
 				}
 				if !errors.Is(err, tc.expectedError) {
-					t.Errorf("expected error %v, got %v", tc.expectedError, err)
+					assert.Condition(t, func() bool {
+						return false
+					}, "expected error %v, got %v", tc.expectedError, err)
 				}
 			} else if err != nil {
-				t.Fatalf("Install: %v", err)
+				require.Condition(t, func() bool {
+					return false
+				}, "Install: %v", err)
 			}
 
 			assertInstallResult(t, hookPath, tc)
@@ -591,7 +597,9 @@ func TestInstall(t *testing.T) {
 				os.WriteFile(hookPath, []byte(existing), 0755)
 
 				if err := Install(repo.HooksDir, hookPostCommit, false); err != nil {
-					t.Fatalf("should append to %s: %v", shebang, err)
+					require.Condition(t, func() bool {
+						return false
+					}, "should append to %s: %v", shebang, err)
 				}
 				assertFileContains(t, hookPath, "echo 'custom'", PostCommitVersionMarker)
 			})
@@ -617,17 +625,20 @@ func assertInstallResult(t *testing.T, hookPath string, tc installTestCase) {
 	if len(tc.orderedChecks) > 1 {
 		content, err := os.ReadFile(hookPath)
 		if err != nil {
-			t.Fatal(err)
+			require.Condition(t, func() bool {
+				return false
+			}, err)
 		}
 		s := string(content)
 		searchFrom := 0
 		for _, check := range tc.orderedChecks {
 			idx := strings.Index(s[searchFrom:], check)
 			if idx == -1 {
-				t.Errorf(
-					"missing %q after offset %d in hook",
-					check, searchFrom,
-				)
+				assert.Condition(t, func() bool {
+					return false
+				}, "missing %q after offset %d in hook",
+					check, searchFrom)
+
 			} else {
 				searchFrom += idx + len(check)
 			}
@@ -652,13 +663,19 @@ func TestInstall_ReReadError(t *testing.T) {
 
 	err := Install(repo.HooksDir, hookPostCommit, false)
 	if err == nil {
-		t.Fatal("expected error from re-read failure")
+		require.Condition(t, func() bool {
+			return false
+		}, "expected error from re-read failure")
 	}
 	if !strings.Contains(err.Error(), "re-read") {
-		t.Errorf("error should mention re-read: %v", err)
+		assert.Condition(t, func() bool {
+			return false
+		}, "error should mention re-read: %v", err)
 	}
 	if !errors.Is(err, fs.ErrPermission) {
-		t.Errorf("should wrap ErrPermission: %v", err)
+		assert.Condition(t, func() bool {
+			return false
+		}, "should wrap ErrPermission: %v", err)
 	}
 }
 
@@ -670,22 +687,27 @@ func TestInstallAll(t *testing.T) {
 	repo := setupHooksRepo(t)
 
 	if err := InstallAll(repo.HooksDir, false); err != nil {
-		t.Fatalf("InstallAll: %v", err)
+		require.Condition(t, func() bool {
+			return false
+		}, "InstallAll: %v", err)
 	}
 
 	for _, name := range []string{hookPostCommit, hookPostRewrite} {
 		path := filepath.Join(repo.HooksDir, name)
 		content, err := os.ReadFile(path)
 		if err != nil {
-			t.Errorf("%s hook not created: %v", name, err)
+			assert.Condition(t, func() bool {
+				return false
+			}, "%s hook not created: %v", name, err)
 			continue
 		}
 		if !strings.Contains(
 			string(content), VersionMarker(name),
 		) {
-			t.Errorf(
-				"%s should contain version marker", name,
-			)
+			assert.Condition(t, func() bool {
+				return false
+			}, "%s should contain version marker", name)
+
 		}
 	}
 }
@@ -783,16 +805,22 @@ func TestUninstall(t *testing.T) {
 			hookPath := filepath.Join(repo.HooksDir, tc.hookName)
 
 			if err := os.WriteFile(hookPath, []byte(tc.initialContent), 0755); err != nil {
-				t.Fatal(err)
+				require.Condition(t, func() bool {
+					return false
+				}, err)
 			}
 
 			if err := Uninstall(hookPath); err != nil {
-				t.Fatalf("Uninstall: %v", err)
+				require.Condition(t, func() bool {
+					return false
+				}, "Uninstall: %v", err)
 			}
 
 			if tc.expectDeleted {
 				if _, err := os.Stat(hookPath); !os.IsNotExist(err) {
-					t.Error("should be deleted entirely")
+					assert.Condition(t, func() bool {
+						return false
+					}, "should be deleted entirely")
 				}
 			} else if tc.expectExact != "" {
 				assertFileEquals(t, hookPath, tc.expectExact)
@@ -810,20 +838,28 @@ func TestUninstall(t *testing.T) {
 	t.Run("missing file is no-op", func(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "nonexistent")
 		if err := Uninstall(path); err != nil {
-			t.Errorf("should be no-op: %v", err)
+			assert.Condition(t, func() bool {
+				return false
+			}, "should be no-op: %v", err)
 		}
 	})
 }
 
 func TestVersionMarker(t *testing.T) {
 	if m := VersionMarker(hookPostCommit); m != PostCommitVersionMarker {
-		t.Errorf("got %q, want %q", m, PostCommitVersionMarker)
+		assert.Condition(t, func() bool {
+			return false
+		}, "got %q, want %q", m, PostCommitVersionMarker)
 	}
 	if m := VersionMarker(hookPostRewrite); m != PostRewriteVersionMarker {
-		t.Errorf("got %q, want %q", m, PostRewriteVersionMarker)
+		assert.Condition(t, func() bool {
+			return false
+		}, "got %q, want %q", m, PostRewriteVersionMarker)
 	}
 	if m := VersionMarker("unknown"); m != "" {
-		t.Errorf("unknown should return empty, got %q", m)
+		assert.Condition(t, func() bool {
+			return false
+		}, "unknown should return empty, got %q", m)
 	}
 }
 
@@ -832,20 +868,26 @@ func TestHasRealErrors(t *testing.T) {
 
 	t.Run("nil", func(t *testing.T) {
 		if HasRealErrors(nil) {
-			t.Error("nil should return false")
+			assert.Condition(t, func() bool {
+				return false
+			}, "nil should return false")
 		}
 	})
 
 	t.Run("only non-shell", func(t *testing.T) {
 		err := fmt.Errorf("hook: %w", ErrNonShellHook)
 		if HasRealErrors(err) {
-			t.Error("single ErrNonShellHook should return false")
+			assert.Condition(t, func() bool {
+				return false
+			}, "single ErrNonShellHook should return false")
 		}
 	})
 
 	t.Run("only real", func(t *testing.T) {
 		if !HasRealErrors(realErr) {
-			t.Error("real error should return true")
+			assert.Condition(t, func() bool {
+				return false
+			}, "real error should return true")
 		}
 	})
 
@@ -855,7 +897,9 @@ func TestHasRealErrors(t *testing.T) {
 			fmt.Errorf("b: %w", ErrNonShellHook),
 		)
 		if HasRealErrors(err) {
-			t.Error("joined non-shell only should return false")
+			assert.Condition(t, func() bool {
+				return false
+			}, "joined non-shell only should return false")
 		}
 	})
 
@@ -865,14 +909,18 @@ func TestHasRealErrors(t *testing.T) {
 			realErr,
 		)
 		if !HasRealErrors(err) {
-			t.Error("joined with real error should return true")
+			assert.Condition(t, func() bool {
+				return false
+			}, "joined with real error should return true")
 		}
 	})
 
 	t.Run("joined all real", func(t *testing.T) {
 		err := errors.Join(realErr, errors.New("disk full"))
 		if !HasRealErrors(err) {
-			t.Error("joined real errors should return true")
+			assert.Condition(t, func() bool {
+				return false
+			}, "joined real errors should return true")
 		}
 	})
 }
@@ -897,7 +945,9 @@ func TestIsRoborevSnippetLine(t *testing.T) {
 	}
 	for _, line := range positives {
 		if !isRoborevSnippetLine(line) {
-			t.Errorf("expected true for %q", line)
+			assert.Condition(t, func() bool {
+				return false
+			}, "expected true for %q", line)
 		}
 	}
 
@@ -909,7 +959,9 @@ func TestIsRoborevSnippetLine(t *testing.T) {
 	}
 	for _, line := range negatives {
 		if isRoborevSnippetLine(line) {
-			t.Errorf("expected false for %q", line)
+			assert.Condition(t, func() bool {
+				return false
+			}, "expected false for %q", line)
 		}
 	}
 }
@@ -920,7 +972,9 @@ func setupHooksRepo(t *testing.T) *testutil.TestRepo {
 	t.Helper()
 	repo := testutil.NewTestRepo(t)
 	if err := os.MkdirAll(repo.HooksDir, 0755); err != nil {
-		t.Fatal(err)
+		require.Condition(t, func() bool {
+			return false
+		}, err)
 	}
 	return repo
 }
@@ -929,7 +983,9 @@ func readFileForAssert(t *testing.T, path string) string {
 	t.Helper()
 	content, err := os.ReadFile(path)
 	if err != nil {
-		t.Fatalf("failed to read %s: %v", path, err)
+		require.Condition(t, func() bool {
+			return false
+		}, "failed to read %s: %v", path, err)
 	}
 	return string(content)
 }
@@ -939,7 +995,9 @@ func assertFileContains(t *testing.T, path string, substrings ...string) {
 	str := readFileForAssert(t, path)
 	for _, sub := range substrings {
 		if !strings.Contains(str, sub) {
-			t.Errorf("file %s should contain %q", filepath.Base(path), sub)
+			assert.Condition(t, func() bool {
+				return false
+			}, "file %s should contain %q", filepath.Base(path), sub)
 		}
 	}
 }
@@ -951,7 +1009,9 @@ func assertFileNotContains(t *testing.T, path string, substrings ...string) {
 		if os.IsNotExist(err) {
 			return // If file doesn't exist, it doesn't contain the substrings
 		}
-		t.Fatalf("failed to read %s: %v", path, err)
+		require.Condition(t, func() bool {
+			return false
+		}, "failed to read %s: %v", path, err)
 	}
 	str := string(content)
 	if str == "" {
@@ -959,7 +1019,9 @@ func assertFileNotContains(t *testing.T, path string, substrings ...string) {
 	}
 	for _, sub := range substrings {
 		if strings.Contains(str, sub) {
-			t.Errorf("file %s should NOT contain %q", filepath.Base(path), sub)
+			assert.Condition(t, func() bool {
+				return false
+			}, "file %s should NOT contain %q", filepath.Base(path), sub)
 		}
 	}
 }
@@ -968,7 +1030,9 @@ func assertFileEquals(t *testing.T, path string, expected string) {
 	t.Helper()
 	str := readFileForAssert(t, path)
 	if str != expected {
-		t.Errorf("file %s content mismatch.\nGot:\n%q\nWant:\n%q", filepath.Base(path), str, expected)
+		assert.Condition(t, func() bool {
+			return false
+		}, "file %s content mismatch.\nGot:\n%q\nWant:\n%q", filepath.Base(path), str, expected)
 	}
 }
 
@@ -976,7 +1040,9 @@ func assertFileHasPrefix(t *testing.T, path string, prefix string) {
 	t.Helper()
 	str := readFileForAssert(t, path)
 	if !strings.HasPrefix(str, prefix) {
-		t.Errorf("file %s should start with:\n%q\nGot start:\n%q", filepath.Base(path), prefix, str)
+		assert.Condition(t, func() bool {
+			return false
+		}, "file %s should start with:\n%q\nGot start:\n%q", filepath.Base(path), prefix, str)
 	}
 }
 

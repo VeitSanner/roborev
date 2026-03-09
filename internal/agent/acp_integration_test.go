@@ -5,6 +5,8 @@ package agent
 import (
 	"bytes"
 	"context"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -46,16 +48,15 @@ func TestACPReviewViaExternalAdapter(t *testing.T) {
 	}
 	args := strings.Fields(strings.TrimSpace(os.Getenv(acpIntegrationArgsEnv)))
 
-	if _, err := exec.LookPath(command); err != nil {
-		t.Fatalf("ACP command %q not found in PATH: %v", command, err)
-	}
+	_, err := exec.LookPath(command)
+	require.NoError(t, err, "ACP command %q not found in PATH: %v", command, err)
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git is required for ACP integration smoke test")
 	}
 
 	repoPath := t.TempDir()
 	if err := os.WriteFile(filepath.Join(repoPath, "README.md"), []byte("# ACP Integration Test\n"), 0o644); err != nil {
-		t.Fatalf("failed to write test file: %v", err)
+		require.NoError(t, err, "failed to write test file: %v")
 	}
 
 	gitRun := func(arguments ...string) string {
@@ -63,25 +64,21 @@ func TestACPReviewViaExternalAdapter(t *testing.T) {
 		cmd := exec.Command("git", arguments...)
 		cmd.Dir = repoPath
 		out, err := cmd.CombinedOutput()
-		if err != nil {
-			t.Fatalf("git %s failed: %v\n%s", strings.Join(arguments, " "), err, string(out))
-		}
+		assert.Equal(t, false, err != nil)
 		return string(out)
 	}
 
 	gitRun("init")
 	disabledHooksDir := filepath.Join(repoPath, ".git", "hooks-disabled")
 	if err := os.MkdirAll(disabledHooksDir, 0o755); err != nil {
-		t.Fatalf("failed to create disabled hooks dir: %v", err)
+		require.NoError(t, err, "failed to create disabled hooks dir: %v")
 	}
 	gitRun("config", "user.email", "acp-integration@example.com")
 	gitRun("config", "user.name", "ACP Integration")
 	gitRun("add", "README.md")
 	gitRun("-c", "commit.gpgsign=false", "-c", "core.hooksPath="+disabledHooksDir, "commit", "--no-verify", "-m", "seed")
 	commitSHA := strings.TrimSpace(gitRun("rev-parse", "HEAD"))
-	if commitSHA == "" {
-		t.Fatal("failed to resolve HEAD commit SHA for integration test")
-	}
+	assert.Equal(t, false, commitSHA == "")
 
 	agent := NewACPAgent(command)
 	agent.Args = args
@@ -105,15 +102,9 @@ func TestACPReviewViaExternalAdapter(t *testing.T) {
 		"Connectivity smoke test: respond with exactly 'ACP_OK' after reading README.md. Do not run roborev commands.",
 		&streamOutput,
 	)
-	if err != nil {
-		t.Fatalf("ACP review failed: %v\nstream output:\n%s", err, streamOutput.String())
-	}
+	assert.Equal(t, false, err != nil)
 
 	trimmed := strings.TrimSpace(result)
-	if trimmed == "" {
-		t.Fatalf("expected non-empty ACP result; stream output:\n%s", streamOutput.String())
-	}
-	if !strings.Contains(trimmed, "ACP_OK") {
-		t.Fatalf("expected ACP_OK marker in result, got:\n%s", trimmed)
-	}
+	assert.Equal(t, false, trimmed == "")
+	assert.Equal(t, false, !strings.Contains(trimmed, "ACP_OK"))
 }

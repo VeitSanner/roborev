@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -15,18 +16,17 @@ import (
 
 	"github.com/roborev-dev/roborev/internal/githook"
 	"github.com/roborev-dev/roborev/internal/testutil"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func assertError(t *testing.T, err error, expectError bool, contains string) {
 	t.Helper()
 	if expectError {
-		if err == nil {
-			t.Error("expected error but got nil")
-		} else if contains != "" && !strings.Contains(err.Error(), contains) {
-			t.Errorf("error %q expected to contain %q", err.Error(), contains)
-		}
-	} else if err != nil {
-		t.Errorf("unexpected error: %v", err)
+		require.Error(t, err, "expected error but got nil")
+		assert.Condition(t, func() bool { return contains == "" || strings.Contains(err.Error(), contains) }, "error text")
+	} else {
+		require.NoError(t, err)
 	}
 }
 
@@ -40,9 +40,8 @@ func TestUninstallHookCmd(t *testing.T) {
 		{
 			name: "hook missing",
 			assert: func(t *testing.T, repo *testutil.TestRepo) {
-				if _, err := os.Stat(repo.HookPath); !os.IsNotExist(err) {
-					t.Error("Hook file should not exist")
-				}
+				_, err := os.Stat(repo.HookPath)
+				require.ErrorIs(t, err, fs.ErrNotExist)
 			},
 		},
 		{
@@ -52,13 +51,10 @@ func TestUninstallHookCmd(t *testing.T) {
 			},
 			assert: func(t *testing.T, repo *testutil.TestRepo) {
 				content, err := os.ReadFile(repo.HookPath)
-				if err != nil {
-					t.Fatalf("Failed to read hook: %v", err)
-				}
+				require.NoError(t, err, "Failed to read hook: %v")
+
 				want := "#!/bin/bash\necho 'other hook'\n"
-				if string(content) != want {
-					t.Errorf("Hook content changed: got %q, want %q", string(content), want)
-				}
+				assert.Equal(t, want, string(content))
 			},
 		},
 		{
@@ -67,9 +63,8 @@ func TestUninstallHookCmd(t *testing.T) {
 				"post-commit": githook.GeneratePostCommit(),
 			},
 			assert: func(t *testing.T, repo *testutil.TestRepo) {
-				if _, err := os.Stat(repo.HookPath); !os.IsNotExist(err) {
-					t.Error("Hook file should have been removed")
-				}
+				_, err := os.Stat(repo.HookPath)
+				require.ErrorIs(t, err, fs.ErrNotExist)
 			},
 		},
 		{
@@ -79,22 +74,13 @@ func TestUninstallHookCmd(t *testing.T) {
 			},
 			assert: func(t *testing.T, repo *testutil.TestRepo) {
 				content, err := os.ReadFile(repo.HookPath)
-				if err != nil {
-					t.Fatalf("Failed to read hook: %v", err)
-				}
+				require.NoError(t, err, "Failed to read hook: %v")
+
 				contentStr := string(content)
-				if strings.Contains(contentStr, githook.PostCommitVersionMarker) {
-					t.Error("Hook should not contain version marker after uninstall")
-				}
-				if strings.Contains(contentStr, `"$ROBOREV" post-commit`) {
-					t.Error("Hook should not contain generated command after uninstall")
-				}
-				if !strings.Contains(contentStr, "echo 'before'") {
-					t.Error("Hook should still contain 'echo before'")
-				}
-				if !strings.Contains(contentStr, "echo 'after'") {
-					t.Error("Hook should still contain 'echo after'")
-				}
+				assert.NotContains(t, contentStr, githook.PostCommitVersionMarker)
+				assert.NotContains(t, contentStr, `"$ROBOREV" post-commit`)
+				assert.Contains(t, contentStr, "echo 'before'")
+				assert.Contains(t, contentStr, "echo 'after'")
 			},
 		},
 		{
@@ -104,13 +90,11 @@ func TestUninstallHookCmd(t *testing.T) {
 				"post-rewrite": githook.GeneratePostRewrite(),
 			},
 			assert: func(t *testing.T, repo *testutil.TestRepo) {
-				if _, err := os.Stat(repo.HookPath); !os.IsNotExist(err) {
-					t.Error("post-commit hook should have been removed")
-				}
+				_, err := os.Stat(repo.HookPath)
+				require.ErrorIs(t, err, fs.ErrNotExist)
 				prPath := filepath.Join(repo.HooksDir, "post-rewrite")
-				if _, err := os.Stat(prPath); !os.IsNotExist(err) {
-					t.Error("post-rewrite hook should have been removed")
-				}
+				_, err = os.Stat(prPath)
+				require.ErrorIs(t, err, fs.ErrNotExist)
 			},
 		},
 		{
@@ -120,9 +104,8 @@ func TestUninstallHookCmd(t *testing.T) {
 			},
 			assert: func(t *testing.T, repo *testutil.TestRepo) {
 				prPath := filepath.Join(repo.HooksDir, "post-rewrite")
-				if _, err := os.Stat(prPath); !os.IsNotExist(err) {
-					t.Error("post-rewrite hook should have been removed")
-				}
+				_, err := os.Stat(prPath)
+				require.ErrorIs(t, err, fs.ErrNotExist)
 			},
 		},
 	}
@@ -137,22 +120,18 @@ func TestUninstallHookCmd(t *testing.T) {
 			}
 
 			if len(tt.initialHooks) > 0 {
-				if err := os.MkdirAll(repo.HooksDir, 0755); err != nil {
-					t.Fatal(err)
-				}
+				err := os.MkdirAll(repo.HooksDir, 0755)
+				require.NoError(t, err)
 				for name, content := range tt.initialHooks {
 					path := filepath.Join(repo.HooksDir, name)
-					if err := os.WriteFile(path, []byte(content), 0755); err != nil {
-						t.Fatal(err)
-					}
+					err = os.WriteFile(path, []byte(content), 0755)
+					require.NoError(t, err)
 				}
 			}
 
 			cmd := uninstallHookCmd()
 			err := cmd.Execute()
-			if err != nil {
-				t.Fatalf("uninstall-hook failed: %v", err)
-			}
+			require.NoError(t, err, "uninstall-hook failed: %v")
 
 			tt.assert(t, repo)
 		})
@@ -167,27 +146,22 @@ func TestInstallHookCmdCreatesHooksDirectory(t *testing.T) {
 	repo := testutil.NewTestRepo(t)
 	repo.RemoveHooksDir()
 
-	if _, err := os.Stat(repo.HooksDir); !os.IsNotExist(err) {
-		t.Fatal("hooks directory should not exist before test")
-	}
+	_, err := os.Stat(repo.HooksDir)
+	require.ErrorIs(t, err, os.ErrNotExist, "hooks directory should not exist before test")
 
 	t.Cleanup(repo.Chdir())
 
 	installCmd := installHookCmd()
 	installCmd.SetArgs([]string{})
-	err := installCmd.Execute()
+	err = installCmd.Execute()
 
-	if err != nil {
-		t.Fatalf("install-hook command failed: %v", err)
-	}
+	require.NoError(t, err, "install-hook command failed: %v")
 
-	if _, err := os.Stat(repo.HooksDir); os.IsNotExist(err) {
-		t.Error("hooks directory was not created")
-	}
+	_, err = os.Stat(repo.HooksDir)
+	require.NoError(t, err)
 
-	if _, err := os.Stat(repo.HookPath); os.IsNotExist(err) {
-		t.Error("post-commit hook was not created")
-	}
+	_, err = os.Stat(repo.HookPath)
+	require.NoError(t, err)
 }
 
 func TestInstallHookCmdCreatesPostRewriteHook(t *testing.T) {
@@ -201,22 +175,15 @@ func TestInstallHookCmdCreatesPostRewriteHook(t *testing.T) {
 
 	installCmd := installHookCmd()
 	installCmd.SetArgs([]string{})
-	if err := installCmd.Execute(); err != nil {
-		t.Fatalf("install-hook failed: %v", err)
-	}
+	err := installCmd.Execute()
+	require.NoError(t, err, "install-hook failed: %v")
 
 	prHookPath := filepath.Join(repo.HooksDir, "post-rewrite")
 	content, err := os.ReadFile(prHookPath)
-	if err != nil {
-		t.Fatalf("post-rewrite hook not created: %v", err)
-	}
+	require.NoError(t, err, "post-rewrite hook not created: %v")
 
-	if !strings.Contains(string(content), "remap --quiet") {
-		t.Error("post-rewrite hook should contain 'remap --quiet'")
-	}
-	if !strings.Contains(string(content), githook.PostRewriteVersionMarker) {
-		t.Error("post-rewrite hook should contain version marker")
-	}
+	assert.Contains(t, string(content), "remap --quiet")
+	assert.Contains(t, string(content), githook.PostRewriteVersionMarker)
 }
 
 func TestIsTransportError(t *testing.T) {
@@ -224,30 +191,22 @@ func TestIsTransportError(t *testing.T) {
 		err := &url.Error{Op: "Post", URL: "http://127.0.0.1:7373", Err: &net.OpError{
 			Op: "dial", Net: "tcp", Err: errors.New("connection refused"),
 		}}
-		if !isTransportError(err) {
-			t.Error("expected url.Error+OpError to be classified as transport error")
-		}
+		assert.True(t, isTransportError(err))
 	})
 
 	t.Run("url.Error without OpError is not transport error", func(t *testing.T) {
 		err := &url.Error{Op: "Post", URL: "http://127.0.0.1:7373", Err: errors.New("some non-transport error")}
-		if isTransportError(err) {
-			t.Error("expected url.Error without net.OpError to NOT be transport error")
-		}
+		assert.False(t, isTransportError(err))
 	})
 
 	t.Run("registerRepoError is not transport error", func(t *testing.T) {
 		err := &registerRepoError{StatusCode: 500, Body: "internal error"}
-		if isTransportError(err) {
-			t.Error("expected registerRepoError to NOT be transport error")
-		}
+		assert.False(t, isTransportError(err))
 	})
 
 	t.Run("plain error is not transport error", func(t *testing.T) {
 		err := fmt.Errorf("something else")
-		if isTransportError(err) {
-			t.Error("expected plain error to NOT be transport error")
-		}
+		assert.False(t, isTransportError(err))
 	})
 
 	t.Run("wrapped url.Error with OpError is transport error", func(t *testing.T) {
@@ -255,25 +214,17 @@ func TestIsTransportError(t *testing.T) {
 			Op: "dial", Net: "tcp", Err: errors.New("connection refused"),
 		}}
 		err := fmt.Errorf("register failed: %w", inner)
-		if !isTransportError(err) {
-			t.Error("expected wrapped url.Error+OpError to be transport error")
-		}
+		assert.True(t, isTransportError(err))
 	})
 }
 
 func TestRegisterRepoError(t *testing.T) {
 	err := &registerRepoError{StatusCode: 500, Body: "internal server error"}
-	if err.Error() != "server returned 500: internal server error" {
-		t.Errorf("unexpected error message: %s", err.Error())
-	}
+	assert.Equal(t, "server returned 500: internal server error", err.Error())
 
 	var regErr *registerRepoError
-	if !errors.As(err, &regErr) {
-		t.Error("expected errors.As to match registerRepoError")
-	}
-	if regErr.StatusCode != 500 {
-		t.Errorf("expected StatusCode 500, got %d", regErr.StatusCode)
-	}
+	require.ErrorAs(t, err, &regErr)
+	assert.Equal(t, 500, regErr.StatusCode)
 }
 
 // initNoDaemonSetup prepares the environment for init --no-daemon tests:
@@ -357,22 +308,17 @@ func TestInitNoDaemon(t *testing.T) {
 				w.WriteHeader(200)
 			},
 			setupFiles: func(t *testing.T, repo *testutil.TestRepo) {
-				if err := os.MkdirAll(repo.HooksDir, 0755); err != nil {
-					t.Fatal(err)
-				}
-				if err := os.WriteFile(filepath.Join(repo.HooksDir, "post-commit"), []byte(githook.GeneratePostCommit()), 0755); err != nil {
-					t.Fatal(err)
-				}
+				err := os.MkdirAll(repo.HooksDir, 0755)
+				require.NoError(t, err)
+				err = os.WriteFile(filepath.Join(repo.HooksDir, "post-commit"), []byte(githook.GeneratePostCommit()), 0755)
+				require.NoError(t, err)
 			},
 			postCheck: func(t *testing.T, repo *testutil.TestRepo) {
 				prHookPath := filepath.Join(repo.HooksDir, "post-rewrite")
 				content, err := os.ReadFile(prHookPath)
-				if err != nil {
-					t.Fatalf("post-rewrite hook should be installed: %v", err)
-				}
-				if !strings.Contains(string(content), "remap --quiet") {
-					t.Error("post-rewrite hook should contain 'remap --quiet'")
-				}
+				require.NoError(t, err, "post-rewrite hook should be installed: %v")
+
+				assert.Contains(t, string(content), "remap --quiet")
 			},
 		},
 		{
@@ -451,14 +397,10 @@ func TestInitNoDaemon(t *testing.T) {
 			})
 
 			for _, s := range tt.expectContains {
-				if !strings.Contains(output, s) {
-					t.Errorf("output missing %q", s)
-				}
+				assert.Contains(t, output, s)
 			}
 			for _, s := range tt.expectNot {
-				if strings.Contains(output, s) {
-					t.Errorf("output should not contain %q", s)
-				}
+				assert.NotContains(t, output, s)
 			}
 
 			if tt.postCheck != nil {
@@ -482,17 +424,23 @@ func TestInitNoDaemonWithAgentCreatesCommentedRepoConfig(t *testing.T) {
 		cmd := initCmd()
 		cmd.SetArgs([]string{"--no-daemon", "--agent", "codex"})
 		if err := cmd.Execute(); err != nil {
-			t.Fatalf("init failed: %v", err)
+			require.Condition(t, func() bool {
+				return false
+			}, "init failed: %v", err)
 		}
 	})
 
 	if !strings.Contains(output, "Created ") || !strings.Contains(output, ".roborev.toml") {
-		t.Fatalf("init output missing repo config creation message:\n%s", output)
+		require.Condition(t, func() bool {
+			return false
+		}, "init output missing repo config creation message:\n%s", output)
 	}
 
 	data, err := os.ReadFile(filepath.Join(repo.Root, ".roborev.toml"))
 	if err != nil {
-		t.Fatalf("read repo config: %v", err)
+		require.Condition(t, func() bool {
+			return false
+		}, "read repo config: %v", err)
 	}
 	got := string(data)
 	for _, want := range []string{
@@ -500,7 +448,9 @@ func TestInitNoDaemonWithAgentCreatesCommentedRepoConfig(t *testing.T) {
 		"agent = 'codex'",
 	} {
 		if !strings.Contains(got, want) {
-			t.Fatalf("repo config missing %q:\n%s", want, got)
+			require.Condition(t, func() bool {
+				return false
+			}, "repo config missing %q:\n%s", want, got)
 		}
 	}
 }
