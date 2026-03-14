@@ -2169,6 +2169,12 @@ func TestMigrateColumnConfig(t *testing.T) {
 			wantDirty:    false,
 			wantColOrder: []string{"ref", "branch", "repo", "agent", "queued", "elapsed", "status", "pf", "closed"},
 		},
+		{
+			name:       "existing hidden_columns preserved without backfill",
+			hiddenCols: []string{"branch"},
+			wantDirty:  false,
+			wantHidden: []string{"branch"},
+		},
 	}
 
 	for _, tt := range tests {

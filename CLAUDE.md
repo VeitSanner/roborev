@@ -349,6 +349,10 @@ roborev tui                          # Terminal UI
 - **Test agent**: Use `agent = "test"` for testing without calling real AI
 - **Isolated tests**: All tests use `t.TempDir()` for temp directories
 
+## Terminal Safety
+
+Sanitize untrusted strings before TUI display: `stripControlChars()` for table cells, `sanitizeForDisplay()` for multi-line content, `sanitizeEscapes()` for streaming lines.
+
 ## Design Constraints
 
 - **Daemon tasks must not modify the git working tree.** Background jobs (reviews, CI polling, synthesis) are read-only with respect to the user's repo checkout. They read source files and write results to the database only. CLI commands like `roborev fix` run synchronously in the foreground and may modify files. Background `fix` jobs run agents in isolated git worktrees (via `internal/worktree`) and store resulting patches in the database — patches are only applied to the working tree when the user explicitly confirms in the TUI.

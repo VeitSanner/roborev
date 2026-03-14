@@ -702,6 +702,11 @@ func LoadGlobalFrom(path string) (*Config, error) {
 	return cfg, nil
 }
 
+// HiddenColumnsNoneSentinel is saved to hidden_columns when the
+// user explicitly wants all columns visible. This distinguishes
+// "hide nothing" from "never configured" (nil/empty slice).
+const HiddenColumnsNoneSentinel = "_"
+
 // migrateDeprecated promotes deprecated config keys to their
 // replacements so the rest of the codebase only reads the new names.
 // Uses TOML metadata to avoid overriding explicitly-set new keys.
@@ -713,19 +718,28 @@ func (c *Config) migrateDeprecated(md toml.MetaData) {
 	}
 	c.HideAddressedByDefault = false
 
-	// hidden_columns: "handled"/"done" → "closed", remove defunct "pf"
+	// Preserve explicit hidden_columns = [] as "hide nothing" before
+	// the rename filter runs — otherwise a stale list that becomes
+	// empty after filtering would be misinterpreted as "hide nothing"
+	// instead of falling through to defaults.
+	explicitlyEmpty := md.IsDefined("hidden_columns") &&
+		len(c.HiddenColumns) == 0
+
+	// hidden_columns: "handled"/"done" → "closed"
 	filtered := c.HiddenColumns[:0]
 	for _, name := range c.HiddenColumns {
 		switch name {
 		case "handled", "done":
 			filtered = append(filtered, "closed")
-		case "pf":
-			// column removed; drop from config
 		default:
 			filtered = append(filtered, name)
 		}
 	}
 	c.HiddenColumns = filtered
+
+	if explicitlyEmpty {
+		c.HiddenColumns = []string{HiddenColumnsNoneSentinel}
+	}
 }
 
 // LoadRepoConfig loads per-repo config from .roborev.toml

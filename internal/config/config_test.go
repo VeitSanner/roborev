@@ -2505,6 +2505,35 @@ func TestHideAddressedDoesNotOverrideExplicitNewKey(t *testing.T) {
 
 }
 
+func TestHiddenColumnsExplicitEmptyBecomesSentinel(t *testing.T) {
+	testenv.SetDataDir(t)
+
+	cfgPath := GlobalConfigPath()
+	require.NoError(t, os.MkdirAll(filepath.Dir(cfgPath), 0755))
+	require.NoError(t, os.WriteFile(cfgPath,
+		[]byte("hidden_columns = []\n"), 0644))
+
+	loaded, err := LoadGlobal()
+	require.NoError(t, err)
+	assert.Equal(t,
+		[]string{HiddenColumnsNoneSentinel}, loaded.HiddenColumns,
+		"explicit hidden_columns = [] should become sentinel")
+}
+
+func TestHiddenColumnsRenamedOnlyDoesNotBecomeSentinel(t *testing.T) {
+	testenv.SetDataDir(t)
+
+	cfgPath := GlobalConfigPath()
+	require.NoError(t, os.MkdirAll(filepath.Dir(cfgPath), 0755))
+	require.NoError(t, os.WriteFile(cfgPath,
+		[]byte("hidden_columns = [\"handled\"]\n"), 0644))
+
+	loaded, err := LoadGlobal()
+	require.NoError(t, err)
+	assert.Equal(t, []string{"closed"}, loaded.HiddenColumns,
+		"hidden_columns with renamed entries should migrate, not become sentinel")
+}
+
 func TestIsDefaultReviewType(t *testing.T) {
 	defaults := []string{"", "default", "general", "review"}
 	for _, rt := range defaults {
