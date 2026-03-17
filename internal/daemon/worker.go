@@ -17,6 +17,7 @@ import (
 	"github.com/roborev-dev/roborev/internal/prompt"
 	"github.com/roborev-dev/roborev/internal/review"
 	"github.com/roborev-dev/roborev/internal/storage"
+	"github.com/roborev-dev/roborev/internal/tokens"
 	"github.com/roborev-dev/roborev/internal/worktree"
 )
 
@@ -575,6 +576,31 @@ func (wp *WorkerPool) processJob(workerID string, job *storage.ReviewJob) {
 			return
 		} else if err := wp.markCompactSourceJobs(workerID, job.ID); err != nil {
 			log.Printf("[%s] Warning: failed to mark compact source jobs for job %d: %v", workerID, job.ID, err)
+		}
+	}
+
+	// Fetch token usage from agentsview (best-effort).
+	// Only collect for fresh sessions (where we captured a new session ID).
+	// Resumed sessions report cumulative totals across all turns, which
+	// would overcount if assigned to a single job.
+	capturedSession := ""
+	if sessionWriter != nil {
+		capturedSession = sessionWriter.SessionID()
+	}
+	wasResumed := job.SessionID != "" && capturedSession == job.SessionID
+	if capturedSession != "" && !wasResumed {
+		usage, tokenErr := tokens.FetchForSession(
+			context.Background(), capturedSession,
+		)
+		if tokenErr != nil {
+			log.Printf("[%s] Warning: fetch token usage for job %d: %v",
+				workerID, job.ID, tokenErr)
+		} else if usage != nil {
+			j := tokens.ToJSON(usage)
+			if err := wp.db.SaveJobTokenUsage(job.ID, j); err != nil {
+				log.Printf("[%s] Warning: save token usage for job %d: %v",
+					workerID, job.ID, err)
+			}
 		}
 	}
 
