@@ -116,7 +116,7 @@ func (a *CodexAgent) CommandLine() string {
 	if agenticMode {
 		args = append(args, codexDangerousFlag)
 	} else {
-		args = append(args, codexAutoApproveFlag)
+		args = append(args, "--sandbox", "read-only")
 	}
 	if a.Model != "" {
 		args = append(args, "-m", a.Model)
@@ -140,7 +140,10 @@ func (a *CodexAgent) buildArgs(repoPath string, agenticMode, autoApprove bool) [
 		args = append(args, codexDangerousFlag)
 	}
 	if autoApprove {
-		args = append(args, codexAutoApproveFlag)
+		// Use read-only sandbox for review mode instead of --full-auto
+		// (which implies --sandbox workspace-write). Background review
+		// jobs run in the user's repo and must not take index.lock.
+		args = append(args, "--sandbox", "read-only")
 	}
 	args = append(args,
 		"-C", repoPath,
@@ -174,15 +177,17 @@ func codexSupportsDangerousFlag(ctx context.Context, command string) (bool, erro
 	return supported, nil
 }
 
-func codexSupportsAutoApproveFlag(ctx context.Context, command string) (bool, error) {
+// codexSupportsNonInteractive checks that codex supports --sandbox,
+// needed for non-agentic review mode (--sandbox read-only).
+func codexSupportsNonInteractive(ctx context.Context, command string) (bool, error) {
 	if cached, ok := codexAutoApproveSupport.Load(command); ok {
 		return cached.(bool), nil
 	}
-	cmd := exec.CommandContext(ctx, command, "--help")
+	cmd := exec.CommandContext(ctx, command, "exec", "--help")
 	output, err := cmd.CombinedOutput()
-	supported := strings.Contains(string(output), codexAutoApproveFlag)
+	supported := strings.Contains(string(output), "--sandbox")
 	if err != nil && !supported {
-		return false, fmt.Errorf("check %s --help: %w: %s", command, err, output)
+		return false, fmt.Errorf("check %s exec --help: %w: %s", command, err, output)
 	}
 	codexAutoApproveSupport.Store(command, supported)
 	return supported, nil
@@ -202,16 +207,16 @@ func (a *CodexAgent) Review(ctx context.Context, repoPath, commitSHA, prompt str
 		}
 	}
 
-	// When piping stdin, codex needs --full-auto to run non-interactively.
-	// Agentic mode uses --dangerously-bypass-approvals-and-sandbox which implies auto-approve.
+	// Non-agentic review mode uses --sandbox read-only for
+	// non-interactive execution without writing to the working tree.
 	autoApprove := false
 	if !agenticMode {
-		supported, err := codexSupportsAutoApproveFlag(ctx, a.Command)
+		supported, err := codexSupportsNonInteractive(ctx, a.Command)
 		if err != nil {
 			return "", err
 		}
 		if !supported {
-			return "", fmt.Errorf("codex requires %s for stdin input; upgrade codex or use --agentic", codexAutoApproveFlag)
+			return "", fmt.Errorf("codex version too old for non-interactive execution; upgrade codex or use --agentic")
 		}
 		autoApprove = true
 	}
