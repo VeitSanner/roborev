@@ -5,16 +5,69 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log"
 	"os/exec"
 	"strings"
+	"sync"
 )
+
+var copilotAllowAllToolsSupport sync.Map
+
+// copilotSupportsAllowAllTools checks whether the copilot binary supports
+// the --allow-all-tools flag needed for non-interactive tool approval.
+// Results are cached per command path.
+func copilotSupportsAllowAllTools(ctx context.Context, command string) (bool, error) {
+	if cached, ok := copilotAllowAllToolsSupport.Load(command); ok {
+		return cached.(bool), nil
+	}
+	cmd := exec.CommandContext(ctx, command, "--help")
+	output, err := cmd.CombinedOutput()
+	supported := strings.Contains(string(output), "--allow-all-tools")
+	if err != nil && !supported {
+		return false, fmt.Errorf("check %s --help: %w: %s", command, err, output)
+	}
+	copilotAllowAllToolsSupport.Store(command, supported)
+	return supported, nil
+}
+
+// copilotReviewDenyTools lists tools denied in review mode to enforce read-only
+// behavior. Deny rules take precedence over --allow-all-tools in copilot's
+// permission system.
+var copilotReviewDenyTools = []string{
+	"write",
+	"shell(git push:*)",
+	"shell(git commit:*)",
+	"shell(git checkout:*)",
+	"shell(git reset:*)",
+	"shell(git rebase:*)",
+	"shell(git merge:*)",
+	"shell(git stash:*)",
+	"shell(git clean:*)",
+	"shell(rm:*)",
+}
+
+// buildArgs constructs CLI arguments for a copilot invocation.
+// In review mode, destructive tools are denied. In agentic mode, all tools
+// are allowed without restriction.
+func (a *CopilotAgent) buildArgs(agenticMode bool) []string {
+	args := []string{"-s", "--allow-all-tools"}
+	if a.Model != "" {
+		args = append(args, "--model", a.Model)
+	}
+	if !agenticMode {
+		for _, tool := range copilotReviewDenyTools {
+			args = append(args, "--deny-tool", tool)
+		}
+	}
+	return args
+}
 
 // CopilotAgent runs code reviews using the GitHub Copilot CLI
 type CopilotAgent struct {
 	Command   string         // The copilot command to run (default: "copilot")
 	Model     string         // Model to use
 	Reasoning ReasoningLevel // Reasoning level (for future support)
-	Agentic   bool           // Whether agentic mode is enabled (note: Copilot requires manual approval for actions)
+	Agentic   bool           // Whether agentic mode is enabled (controls --deny-tool flags)
 }
 
 // NewCopilotAgent creates a new Copilot agent
@@ -36,8 +89,8 @@ func (a *CopilotAgent) WithReasoning(level ReasoningLevel) Agent {
 }
 
 // WithAgentic returns a copy of the agent configured for agentic mode.
-// Note: Copilot CLI requires manual approval for all actions and does not support
-// automated unsafe execution. The agentic flag is tracked but has no effect on Copilot's behavior.
+// In agentic mode, all tools are allowed without restriction. In review mode
+// (default), destructive tools are denied via --deny-tool flags.
 func (a *CopilotAgent) WithAgentic(agentic bool) Agent {
 	return &CopilotAgent{
 		Command:   a.Command,
@@ -77,9 +130,20 @@ func (a *CopilotAgent) CommandLine() string {
 }
 
 func (a *CopilotAgent) Review(ctx context.Context, repoPath, commitSHA, prompt string, output io.Writer) (string, error) {
-	args := []string{}
-	if a.Model != "" {
-		args = append(args, "--model", a.Model)
+	agenticMode := a.Agentic || AllowUnsafeAgents()
+
+	supported, err := copilotSupportsAllowAllTools(ctx, a.Command)
+	if err != nil {
+		log.Printf("copilot: cannot detect --allow-all-tools support: %v", err)
+	}
+
+	var args []string
+	if supported {
+		args = a.buildArgs(agenticMode)
+	} else {
+		if a.Model != "" {
+			args = append(args, "--model", a.Model)
+		}
 	}
 
 	cmd := exec.CommandContext(ctx, a.Command, args...)
