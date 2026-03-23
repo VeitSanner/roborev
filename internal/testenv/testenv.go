@@ -14,42 +14,34 @@ import (
 // environment variables and preserves the original test exit code.
 func RunIsolatedMain(m *testing.M) int {
 	// Snapshot prod log state BEFORE overriding ROBOREV_DATA_DIR.
-	barrier := NewProdLogBarrier(DefaultProdDataDir())
+	// Best-effort: if the home directory can't be resolved (e.g. CI
+	// containers with no HOME), skip the barrier rather than aborting.
+	var barrier *ProdLogBarrier
+	if prodDataDir, err := DefaultProdDataDir(); err == nil {
+		barrier = NewProdLogBarrier(prodDataDir)
+	}
 
-	tmpDir, err := os.MkdirTemp("", "roborev-test-*")
+	tmpDir, cleanupTempDir, err := createIsolatedDataDir()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "failed to create temp dir: %v\n", err)
 		return 1
 	}
-	defer os.RemoveAll(tmpDir)
+	defer cleanupTempDir()
 
-	// Prevent global/system git config from leaking into tests.
-	// Without this, commit.gpgsign=true in global config triggers
-	// gpg-agent/pinentry during test commits. os.DevNull is
-	// cross-platform (/dev/null on Unix, NUL on Windows).
-	os.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
-	os.Setenv("GIT_CONFIG_NOSYSTEM", "1")
-	// Never allow git to prompt for input (passwords, passphrases, etc).
-	// If something unexpected tries to prompt, fail fast instead of blocking.
-	os.Setenv("GIT_TERMINAL_PROMPT", "0")
+	configureGitForTests()
 
-	origEnv, hasEnv := os.LookupEnv("ROBOREV_DATA_DIR")
-	os.Setenv("ROBOREV_DATA_DIR", tmpDir)
-	defer func() {
-		if hasEnv {
-			os.Setenv("ROBOREV_DATA_DIR", origEnv)
-		} else {
-			os.Unsetenv("ROBOREV_DATA_DIR")
-		}
-	}()
+	restoreDataDir := setDataDirEnv(tmpDir)
+	defer restoreDataDir()
 
 	code := m.Run()
 
 	// Hard barrier: fail if tests polluted production logs.
-	if msg := barrier.Check(); msg != "" {
-		fmt.Fprintln(os.Stderr, msg)
-		if code == 0 {
-			return 1
+	if barrier != nil {
+		if msg := barrier.Check(); msg != "" {
+			fmt.Fprintln(os.Stderr, msg)
+			if code == 0 {
+				return 1
+			}
 		}
 	}
 	return code
@@ -69,4 +61,38 @@ func SetDataDir(t *testing.T) string {
 	t.Setenv("ROBOREV_DATA_DIR", tmpDir)
 
 	return tmpDir
+}
+
+func createIsolatedDataDir() (string, func(), error) {
+	tmpDir, err := os.MkdirTemp("", "roborev-test-*")
+	if err != nil {
+		return "", nil, err
+	}
+	return tmpDir, func() {
+		_ = os.RemoveAll(tmpDir)
+	}, nil
+}
+
+func setDataDirEnv(dir string) func() {
+	origEnv, hasEnv := os.LookupEnv("ROBOREV_DATA_DIR")
+	_ = os.Setenv("ROBOREV_DATA_DIR", dir)
+	return func() {
+		if hasEnv {
+			_ = os.Setenv("ROBOREV_DATA_DIR", origEnv)
+			return
+		}
+		_ = os.Unsetenv("ROBOREV_DATA_DIR")
+	}
+}
+
+func configureGitForTests() {
+	// Prevent global/system git config from leaking into tests.
+	// Without this, commit.gpgsign=true in global config triggers
+	// gpg-agent/pinentry during test commits. os.DevNull is
+	// cross-platform (/dev/null on Unix, NUL on Windows).
+	_ = os.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
+	_ = os.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	// Never allow git to prompt for input (passwords, passphrases, etc).
+	// If something unexpected tries to prompt, fail fast instead of blocking.
+	_ = os.Setenv("GIT_TERMINAL_PROMPT", "0")
 }
