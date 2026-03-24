@@ -1,13 +1,9 @@
 package agent
 
 import (
-	"bufio"
-	"bytes"
 	"context"
 	"encoding/json"
-	"fmt"
 	"io"
-	"os/exec"
 	"regexp"
 	"strings"
 	"unicode"
@@ -111,76 +107,37 @@ func (a *OpenCodeAgent) Review(
 ) (string, error) {
 	args := a.buildArgs()
 
-	cmd := exec.CommandContext(ctx, a.Command, args...)
-	cmd.Dir = repoPath
-	cmd.Stdin = strings.NewReader(prompt)
-	tracker := configureSubprocess(cmd)
-
-	// Share a single syncWriter so stdout and stderr writes
-	// to the output writer are serialized by one mutex.
-	sw := newSyncWriter(output)
-
-	var stderrBuf bytes.Buffer
-	if sw != nil {
-		cmd.Stderr = io.MultiWriter(&stderrBuf, sw)
-	} else {
-		cmd.Stderr = &stderrBuf
+	runResult, runErr := runStreamingCLI(ctx, streamingCLISpec{
+		Name:         "opencode",
+		Command:      a.Command,
+		Args:         args,
+		Dir:          repoPath,
+		Stdin:        strings.NewReader(prompt),
+		Output:       output,
+		StreamStderr: true,
+		DrainStdout:  true,
+		Parse:        parseOpenCodeJSON,
+	})
+	if runErr != nil {
+		return "", runErr
 	}
 
-	stdoutPipe, err := cmd.StdoutPipe()
-	if err != nil {
-		return "", fmt.Errorf("create stdout pipe: %w", err)
-	}
-	stopClosingPipe := closeOnContextDone(ctx, stdoutPipe)
-	defer stopClosingPipe()
-
-	if err := cmd.Start(); err != nil {
-		return "", fmt.Errorf("start opencode: %w", err)
-	}
-	defer stdoutPipe.Close()
-
-	result, parseErr := parseOpenCodeJSON(stdoutPipe, sw)
-
-	// Drain remaining stdout so the subprocess can finish writing
-	// and exit. Without this, cmd.Wait() can deadlock if the
-	// parser returned early (e.g., read error) while the process
-	// is still writing to the pipe.
-	_, _ = io.Copy(io.Discard, stdoutPipe)
-
-	if waitErr := cmd.Wait(); waitErr != nil {
-		if ctxErr := contextProcessError(ctx, tracker, waitErr, parseErr); ctxErr != nil {
-			return "", ctxErr
-		}
-		var detail strings.Builder
-		fmt.Fprintf(&detail, "opencode failed")
-		if parseErr != nil {
-			fmt.Fprintf(&detail, "\nstream: %v", parseErr)
-		}
-		if s := stderrBuf.String(); s != "" {
-			fmt.Fprintf(&detail, "\nstderr: %s", s)
-		}
-		if result != "" {
-			partial := result
-			if len(partial) > 500 {
-				partial = partial[:500] + "..."
-			}
-			fmt.Fprintf(&detail, "\npartial output: %s", partial)
-		}
-		return "", fmt.Errorf("%s: %w", detail.String(), waitErr)
+	if runResult.WaitErr != nil {
+		return "", formatDetailedCLIWaitError(runResult, detailedCLIWaitErrorOptions{
+			AgentName:     "opencode",
+			Stderr:        runResult.Stderr,
+			PartialOutput: runResult.Result,
+		})
 	}
 
-	if ctxErr := contextProcessError(ctx, tracker, nil, parseErr); ctxErr != nil {
-		return "", ctxErr
+	if runResult.ParseErr != nil {
+		return runResult.Result, runResult.ParseErr
 	}
 
-	if parseErr != nil {
-		return result, parseErr
-	}
-
-	if result == "" {
+	if runResult.Result == "" {
 		return "No review output generated", nil
 	}
-	return result, nil
+	return runResult.Result, nil
 }
 
 // opencodeEvent represents a top-level JSONL event from opencode --format json.
@@ -201,43 +158,25 @@ type opencodePart struct {
 func parseOpenCodeJSON(
 	r io.Reader, sw *syncWriter,
 ) (string, error) {
-	br := bufio.NewReader(r)
-
 	textParts := newTrailingReviewText()
 
-	for {
-		line, err := br.ReadString('\n')
-		if err != nil && err != io.EOF {
-			return textParts.Join(""), fmt.Errorf(
-				"read stream: %w", err,
-			)
-		}
-
-		line = strings.TrimSpace(line)
-		if line != "" {
-			if sw != nil {
-				_, _ = sw.Write([]byte(line + "\n"))
-			}
-
-			var ev opencodeEvent
-			if json.Unmarshal([]byte(line), &ev) == nil &&
-				ev.Part != nil {
-				var part opencodePart
-				if json.Unmarshal(ev.Part, &part) == nil &&
-					part.Type != "" {
-					if part.Type == "tool" {
-						textParts.ResetAfterTool()
-					}
-					if part.Type == "text" && part.Text != "" {
-						textParts.Add(stripTerminalControls(part.Text))
-					}
+	err := scanStreamJSONLines(r, sw, func(line string) error {
+		var ev opencodeEvent
+		if json.Unmarshal([]byte(line), &ev) == nil && ev.Part != nil {
+			var part opencodePart
+			if json.Unmarshal(ev.Part, &part) == nil && part.Type != "" {
+				if part.Type == "tool" {
+					textParts.ResetAfterTool()
+				}
+				if part.Type == "text" && part.Text != "" {
+					textParts.Add(stripTerminalControls(part.Text))
 				}
 			}
 		}
-
-		if err == io.EOF {
-			break
-		}
+		return nil
+	})
+	if err != nil {
+		return textParts.Join(""), err
 	}
 
 	return textParts.Join(""), nil

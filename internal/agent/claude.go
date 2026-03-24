@@ -1,8 +1,6 @@
 package agent
 
 import (
-	"bufio"
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -188,82 +186,57 @@ func (a *ClaudeAgent) Review(ctx context.Context, repoPath, commitSHA, prompt st
 	// Build args - always uses stdin piping + stream-json for non-interactive execution
 	args := a.buildArgs(agenticMode, includeEffort)
 
-	cmd := exec.CommandContext(ctx, a.Command, args...)
-	cmd.Dir = repoPath
-
 	// Strip CLAUDECODE to prevent nested-session detection (#270),
 	// and handle API key (configured key or subscription auth).
 	// Use cmd.Environ() (not os.Environ()) so PWD=<cmd.Dir> is
 	// synthesized correctly. Set env before configureSubprocess so
 	// GIT_OPTIONAL_LOCKS=0 is appended to the final environment.
 	stripKeys := []string{"ANTHROPIC_API_KEY", "CLAUDECODE"}
+	cmd := exec.CommandContext(ctx, a.Command, args...)
+	cmd.Dir = repoPath
 	baseEnv := cmd.Environ()
+	env := filterEnv(baseEnv, stripKeys...)
 	if apiKey := AnthropicAPIKey(); apiKey != "" {
-		cmd.Env = append(filterEnv(baseEnv, stripKeys...), "ANTHROPIC_API_KEY="+apiKey)
-	} else {
-		cmd.Env = filterEnv(baseEnv, stripKeys...)
+		env = append(env, "ANTHROPIC_API_KEY="+apiKey)
 	}
-	// Suppress sounds from Claude Code (notification/completion sounds)
-	cmd.Env = append(cmd.Env, "CLAUDE_NO_SOUND=1")
+	env = append(env, "CLAUDE_NO_SOUND=1")
 
-	tracker := configureSubprocess(cmd)
-
-	var stderr bytes.Buffer
-	stdoutPipe, err := cmd.StdoutPipe()
-	if err != nil {
-		return "", fmt.Errorf("create stdout pipe: %w", err)
-	}
-	stopClosingPipe := closeOnContextDone(ctx, stdoutPipe)
-	defer stopClosingPipe()
-	cmd.Stderr = &stderr
-
-	// Always pipe prompt via stdin (stream-json mode)
-	cmd.Stdin = strings.NewReader(prompt)
-
-	if err := cmd.Start(); err != nil {
-		return "", fmt.Errorf("start claude: %w", err)
-	}
-
-	// Parse stream-json output
-	result, err := parseStreamJSON(stdoutPipe, output)
-
-	if waitErr := cmd.Wait(); waitErr != nil {
-		if ctxErr := contextProcessError(ctx, tracker, waitErr, err); ctxErr != nil {
-			return "", ctxErr
-		}
-		// Build a detailed error including any partial output and stream errors
-		var detail strings.Builder
-		fmt.Fprintf(&detail, "%s failed", a.Name())
-		if err != nil {
-			fmt.Fprintf(&detail, "\nstream: %v", err)
-		}
-		if s := stderr.String(); s != "" {
-			fmt.Fprintf(&detail, "\nstderr: %s", s)
-		}
-		if result != "" {
-			// Truncate partial output to keep error messages readable
-			partial := result
-			if len(partial) > 500 {
-				partial = partial[:500] + "..."
+	runResult, runErr := runStreamingCLI(ctx, streamingCLISpec{
+		Name:    "claude",
+		Command: a.Command,
+		Args:    args,
+		Dir:     repoPath,
+		Env:     env,
+		Stdin:   strings.NewReader(prompt),
+		Output:  output,
+		Parse: func(r io.Reader, sw *syncWriter) (string, error) {
+			if sw == nil {
+				return parseStreamJSON(r, nil)
 			}
-			fmt.Fprintf(&detail, "\npartial output: %s", partial)
-		}
-		return "", fmt.Errorf("%s: %w", detail.String(), waitErr)
+			return parseStreamJSON(r, sw)
+		},
+	})
+	if runErr != nil {
+		return "", runErr
 	}
 
-	if ctxErr := contextProcessError(ctx, tracker, nil, err); ctxErr != nil {
-		return "", ctxErr
+	if runResult.WaitErr != nil {
+		return "", formatDetailedCLIWaitError(runResult, detailedCLIWaitErrorOptions{
+			AgentName:     a.Name(),
+			Stderr:        runResult.Stderr,
+			PartialOutput: runResult.Result,
+		})
 	}
 
-	if err != nil {
-		return "", err
+	if runResult.ParseErr != nil {
+		return "", runResult.ParseErr
 	}
 
-	if result == "" {
+	if runResult.Result == "" {
 		return "No review output generated", nil
 	}
 
-	return result, nil
+	return runResult.Result, nil
 }
 
 // claudeStreamMessage represents a message in Claude's stream-json output format
@@ -317,73 +290,47 @@ func extractContentText(raw json.RawMessage) string {
 // On success, returns (result, nil). On failure, returns (partialOutput, error)
 // where partialOutput contains any assistant messages collected before the error.
 func parseStreamJSON(r io.Reader, output io.Writer) (string, error) {
-	br := bufio.NewReader(r)
-
 	var lastResult string
 	assistantMessages := newTrailingReviewText()
 	var errorMessages []string
 	var validEventsParsed bool
 
-	for {
-		line, err := br.ReadString('\n')
-		if err != nil && err != io.EOF {
-			return "", fmt.Errorf("read stream: %w", err)
-		}
+	err := scanStreamJSONLines(r, output, func(line string) error {
+		var msg claudeStreamMessage
+		if jsonErr := json.Unmarshal([]byte(line), &msg); jsonErr == nil {
+			validEventsParsed = true
 
-		// Process line even if EOF (might have trailing content without newline)
-		line = strings.TrimSpace(line)
-		if line != "" {
-			// Stream raw line to the writer for progress visibility
-			if sw := newSyncWriter(output); sw != nil {
-				_, _ = sw.Write([]byte(line + "\n"))
+			if msg.Type == "assistant" {
+				if text := extractContentText(msg.Message.Content); text != "" {
+					assistantMessages.Add(text)
+				}
+			}
+			if msg.Type == "tool_use" || msg.Type == "tool_result" {
+				assistantMessages.ResetAfterTool()
 			}
 
-			var msg claudeStreamMessage
-			if jsonErr := json.Unmarshal([]byte(line), &msg); jsonErr == nil {
-				validEventsParsed = true
-
-				// Collect assistant messages for the result.
-				// Content can be a string or an array of content blocks.
-				if msg.Type == "assistant" {
-					if text := extractContentText(msg.Message.Content); text != "" {
-						assistantMessages.Add(text)
-					}
-				}
-				if msg.Type == "tool_use" || msg.Type == "tool_result" {
-					// Only the trailing post-tool assistant segment is treated
-					// as the review body.
-					assistantMessages.ResetAfterTool()
-				}
-
-				// The final result message contains the summary.
-				// When is_error is set, the result event signals a
-				// failure (auth, API, quota, etc.) — capture the
-				// error details instead of treating it as output.
-				if msg.Type == "result" {
-					if msg.IsError {
-						errMsg := "review returned error"
-						if msg.Error.Message != "" {
-							errMsg = msg.Error.Message
-						} else if msg.Result != "" {
-							errMsg = msg.Result
-						}
-						errorMessages = append(errorMessages, errMsg)
+			if msg.Type == "result" {
+				if msg.IsError {
+					errMsg := "review returned error"
+					if msg.Error.Message != "" {
+						errMsg = msg.Error.Message
 					} else if msg.Result != "" {
-						lastResult = msg.Result
+						errMsg = msg.Result
 					}
-				}
-
-				// Capture standalone error events from Claude Code
-				if msg.Type == "error" && msg.Error.Message != "" {
-					errorMessages = append(errorMessages, msg.Error.Message)
+					errorMessages = append(errorMessages, errMsg)
+				} else if msg.Result != "" {
+					lastResult = msg.Result
 				}
 			}
-			// Skip malformed JSON lines silently
-		}
 
-		if err == io.EOF {
-			break
+			if msg.Type == "error" && msg.Error.Message != "" {
+				errorMessages = append(errorMessages, msg.Error.Message)
+			}
 		}
+		return nil
+	})
+	if err != nil {
+		return "", err
 	}
 
 	// Error if we didn't parse any valid events
