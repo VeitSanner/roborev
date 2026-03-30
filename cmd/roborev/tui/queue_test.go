@@ -2163,9 +2163,11 @@ func TestMigrateColumnConfig(t *testing.T) {
 		name         string
 		columnOrder  []string
 		hiddenCols   []string
+		version      int
 		wantDirty    bool
 		wantColOrder []string
 		wantHidden   []string
+		wantVersion  int
 	}{
 		{
 			name:         "nil config unchanged",
@@ -2210,23 +2212,54 @@ func TestMigrateColumnConfig(t *testing.T) {
 			wantColOrder: []string{"ref", "branch", "repo", "agent", "queued", "elapsed", "status", "pf", "closed"},
 		},
 		{
-			name:       "existing hidden_columns preserved without backfill",
-			hiddenCols: []string{"branch"},
+			name:        "stale hidden_columns backfills only new columns",
+			hiddenCols:  []string{"branch"},
+			wantDirty:   true,
+			wantHidden:  []string{"branch", "requested_model", "requested_provider"},
+			wantVersion: 1,
+		},
+		{
+			name:        "visible session_id preserved during backfill",
+			hiddenCols:  []string{"branch", "session_id"},
+			wantDirty:   true,
+			wantHidden:  []string{"branch", "session_id", "requested_model", "requested_provider"},
+			wantVersion: 1,
+		},
+		{
+			name:        "hidden_columns already has new defaults",
+			hiddenCols:  []string{"session_id", "requested_model", "requested_provider"},
+			wantDirty:   true,
+			wantHidden:  []string{"session_id", "requested_model", "requested_provider"},
+			wantVersion: 1,
+		},
+		{
+			name:       "sentinel preserves show-all intent",
+			hiddenCols: []string{"_"},
 			wantDirty:  false,
-			wantHidden: []string{"branch"},
+			wantHidden: []string{"_"},
+		},
+		{
+			name:        "version 1 config not re-migrated",
+			hiddenCols:  []string{"branch"},
+			version:     1,
+			wantDirty:   false,
+			wantHidden:  []string{"branch"},
+			wantVersion: 1,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := &config.Config{
-				ColumnOrder:   slices.Clone(tt.columnOrder),
-				HiddenColumns: slices.Clone(tt.hiddenCols),
+				ColumnOrder:         slices.Clone(tt.columnOrder),
+				HiddenColumns:       slices.Clone(tt.hiddenCols),
+				ColumnConfigVersion: tt.version,
 			}
 			dirty := migrateColumnConfig(cfg)
 			assert.Equal(t, tt.wantDirty, dirty)
 			assert.True(t, slices.Equal(cfg.ColumnOrder, tt.wantColOrder))
 			assert.True(t, slices.Equal(cfg.HiddenColumns, tt.wantHidden))
+			assert.Equal(t, tt.wantVersion, cfg.ColumnConfigVersion)
 		})
 	}
 }
@@ -2277,4 +2310,229 @@ func TestDefaultHiddenColumnsIncludeRequestedFields(t *testing.T) {
 	assert.True(t, hidden[colSessionID])
 	assert.True(t, hidden[colRequestedModel])
 	assert.True(t, hidden[colRequestedProvider])
+}
+
+// --- Column smoke tests ---
+//
+// These invariant tests prevent a class of bug where new columns
+// are added to the column enum but one or more metadata structures
+// (allHeaders, columnNames, columnConfigNames, fixedWidth,
+// defaultHiddenColumns, migrateColumnConfig) are not updated.
+
+// TestColumnMetadataComplete verifies every toggleable column has
+// entries in all required metadata maps.
+func TestColumnMetadataComplete(t *testing.T) {
+	assert := assert.New(t)
+
+	// toggleableColumns should cover all columns except colSel
+	// and colJobID (which are always visible).
+	assert.Len(toggleableColumns, colCount-2,
+		"toggleableColumns count must equal colCount-2; "+
+			"did you add a column to the enum without adding "+
+			"it to toggleableColumns?")
+
+	for _, col := range toggleableColumns {
+		assert.NotEmpty(columnNames[col],
+			"column %d missing from columnNames", col)
+		assert.NotEmpty(columnConfigNames[col],
+			"column %d missing from columnConfigNames", col)
+	}
+}
+
+// TestAllColumnsVisibleHeadersPresent renders the queue with every
+// column visible and checks that each column header appears in the
+// rendered output. Catches missing entries in the allHeaders array
+// inside renderQueueView.
+func TestAllColumnsVisibleHeadersPresent(t *testing.T) {
+	m := newModel(localhostEndpoint, withExternalIODisabled())
+	m.width = 300 // wide enough for all columns
+	m.height = 20
+	m.hiddenColumns = map[int]bool{} // show all
+	m.jobs = []storage.ReviewJob{
+		makeJob(1, withRef("abc1234"),
+			withRepoName("repo"), withAgent("test")),
+	}
+	m.selectedIdx = 0
+	m.selectedJobID = 1
+
+	output := m.renderQueueView()
+
+	// Find the header line (contains "Status" and "P/F")
+	var headerLine string
+	for line := range strings.SplitSeq(output, "\n") {
+		stripped := stripTestANSI(line)
+		if strings.Contains(stripped, "Status") &&
+			strings.Contains(stripped, "P/F") {
+			headerLine = stripped
+			break
+		}
+	}
+	require.NotEmpty(t, headerLine, "could not find header line")
+
+	for _, col := range toggleableColumns {
+		name := columnNames[col]
+		assert.Contains(t, headerLine, name,
+			"header missing column %q (col=%d)", name, col)
+	}
+}
+
+// TestQueueRenderWithStaleHiddenConfig simulates an existing user
+// whose hidden_columns config predates newly added columns. After
+// migration, new default-hidden columns must be hidden and flex
+// columns (Ref, Branch, Repo) must retain usable widths.
+func TestQueueRenderWithStaleHiddenConfig(t *testing.T) {
+	// Pre-upgrade config (version 0): only session_id hidden
+	staleCfg := &config.Config{
+		HiddenColumns: []string{"session_id"},
+	}
+	migrateColumnConfig(staleCfg)
+	migratedHidden := parseHiddenColumns(staleCfg.HiddenColumns)
+
+	// New columns must be hidden after migration
+	assert.True(t, migratedHidden[colRequestedModel],
+		"requested_model should be hidden after migration")
+	assert.True(t, migratedHidden[colRequestedProvider],
+		"requested_provider should be hidden after migration")
+
+	// Render with migrated config — flex columns must not be
+	// starved by phantom visible columns
+	m := newModel(localhostEndpoint, withExternalIODisabled())
+	m.width = 120
+	m.height = 20
+	m.hiddenColumns = migratedHidden
+	m.jobs = []storage.ReviewJob{
+		makeJob(1,
+			withRef("abc1234"),
+			withRepoName("my-project"),
+			withBranch("feature/branch"),
+			withAgent("test"),
+		),
+	}
+	m.selectedIdx = 0
+	m.selectedJobID = 1
+
+	output := m.renderQueueView()
+	found := false
+	for line := range strings.SplitSeq(output, "\n") {
+		if strings.Contains(stripTestANSI(line), "my-project") {
+			found = true
+			break
+		}
+	}
+	assert.True(t, found,
+		"repo name should not be truncated with migrated config "+
+			"at width=120")
+}
+
+// TestQueueRenderPostMigrationUserChoice verifies that after the
+// version-1 migration, a user who explicitly unhides new columns
+// keeps their choice on subsequent startups.
+func TestQueueRenderPostMigrationUserChoice(t *testing.T) {
+	// Post-migration config: user unhid all default-hidden columns
+	postCfg := &config.Config{
+		HiddenColumns:       []string{"branch"},
+		ColumnConfigVersion: 1,
+	}
+	dirty := migrateColumnConfig(postCfg)
+	assert.False(t, dirty, "version-1 config should not be re-migrated")
+	assert.Equal(t, []string{"branch"}, postCfg.HiddenColumns,
+		"user's explicit column choices must be preserved")
+}
+
+// TestSaveColumnOptionStampsVersion simulates the save-then-reload
+// cycle: a user starts from a version-0 config (e.g., sentinel or
+// nil hidden_columns), customizes column visibility through the TUI
+// options modal, and saves. On next startup, the saved config must
+// not be re-migrated — saveColumnOptions stamps ColumnConfigVersion.
+func TestSaveColumnOptionStampsVersion(t *testing.T) {
+	// Simulate what saveColumnOptions writes: the user chose to hide
+	// only "branch", showing all default-hidden columns.
+	// saveColumnOptions now stamps ColumnConfigVersion = 1.
+	savedCfg := &config.Config{
+		HiddenColumns:       []string{"branch"},
+		ColumnConfigVersion: 1, // stamped by saveColumnOptions
+	}
+
+	// Next startup: migrateColumnConfig must not backfill
+	dirty := migrateColumnConfig(savedCfg)
+	assert.False(t, dirty)
+	assert.Equal(t, []string{"branch"}, savedCfg.HiddenColumns,
+		"saved column preferences must survive reload")
+	assert.Equal(t, 1, savedCfg.ColumnConfigVersion)
+
+	// Contrast: without the version stamp, migration would backfill
+	unstampedCfg := &config.Config{
+		HiddenColumns:       []string{"branch"},
+		ColumnConfigVersion: 0, // missing stamp (the bug)
+	}
+	dirty = migrateColumnConfig(unstampedCfg)
+	assert.True(t, dirty,
+		"version-0 config with explicit hidden_columns must "+
+			"trigger migration")
+	assert.Equal(t, 1, unstampedCfg.ColumnConfigVersion)
+}
+
+// TestSaveColumnOptionsWritesVersion exercises the real
+// saveColumnOptions → config.LoadGlobal/SaveGlobal path and
+// verifies ColumnConfigVersion is persisted.
+func TestSaveColumnOptionsWritesVersion(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("ROBOREV_DATA_DIR", tmpDir)
+
+	// Seed a version-0 config with sentinel hidden_columns
+	seedCfg := &config.Config{
+		HiddenColumns: []string{config.HiddenColumnsNoneSentinel},
+	}
+	require.NoError(t, config.SaveGlobal(seedCfg))
+
+	// Build a model that will save column preferences
+	m := newModel(localhostEndpoint, withExternalIODisabled())
+	m.hiddenColumns = map[int]bool{colBranch: true}
+
+	// Execute the save command
+	cmd := m.saveColumnOptions()
+	msg := cmd()
+	assert.Nil(t, msg, "saveColumnOptions should succeed")
+
+	// Reload and verify both version and hidden columns were persisted
+	loaded, err := config.LoadGlobal()
+	require.NoError(t, err)
+	assert.Equal(t, 1, loaded.ColumnConfigVersion,
+		"ColumnConfigVersion must be persisted by saveColumnOptions")
+	assert.Equal(t, []string{"branch"}, loaded.HiddenColumns,
+		"HiddenColumns must match the user's selection")
+
+	// Verify the saved config survives migration without changes
+	dirty := migrateColumnConfig(loaded)
+	assert.False(t, dirty,
+		"freshly saved config must not trigger migration")
+}
+
+// TestMigratePreV1ConfigWithVisibleNewColumns documents the
+// migration behavior for the edge case where a user was briefly on
+// the buggy version (d2d671f6) and explicitly saved preferences
+// showing the new columns before ColumnConfigVersion existed.
+//
+// The migration cannot distinguish this from a stale config, so it
+// backfills. This is the correct tradeoff: the buggy window was
+// brief and the columns being visible caused broken layouts.
+func TestMigratePreV1ConfigWithVisibleNewColumns(t *testing.T) {
+	// User saved ["branch"] during buggy window, intending to show
+	// requested_model and requested_provider. No version stamp.
+	cfg := &config.Config{
+		HiddenColumns: []string{"branch"},
+	}
+
+	dirty := migrateColumnConfig(cfg)
+	assert.True(t, dirty)
+	assert.Equal(t, 1, cfg.ColumnConfigVersion)
+
+	// Migration backfills — user must re-unhide via options modal
+	hidden := parseHiddenColumns(cfg.HiddenColumns)
+	assert.True(t, hidden[colRequestedModel])
+	assert.True(t, hidden[colRequestedProvider])
+
+	// Second run: version stamp prevents re-migration
+	dirty = migrateColumnConfig(cfg)
+	assert.False(t, dirty)
 }
