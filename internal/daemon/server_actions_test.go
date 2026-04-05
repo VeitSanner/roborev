@@ -1,11 +1,8 @@
 package daemon
 
 import (
-	"github.com/roborev-dev/roborev/internal/config"
-	"github.com/roborev-dev/roborev/internal/storage"
-	"github.com/roborev-dev/roborev/internal/testutil"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
+	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -14,7 +11,37 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/roborev-dev/roborev/internal/agent"
+	"github.com/roborev-dev/roborev/internal/config"
+	"github.com/roborev-dev/roborev/internal/storage"
+	"github.com/roborev-dev/roborev/internal/testutil"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
+
+type commandTestAgent struct {
+	name    string
+	command string
+}
+
+func (a *commandTestAgent) Name() string { return a.name }
+
+func (a *commandTestAgent) Review(ctx context.Context, repoPath, commitSHA, prompt string, output io.Writer) (string, error) {
+	return "No issues found.", nil
+}
+
+func (a *commandTestAgent) WithReasoning(level agent.ReasoningLevel) agent.Agent {
+	return a
+}
+
+func (a *commandTestAgent) WithAgentic(agentic bool) agent.Agent { return a }
+
+func (a *commandTestAgent) WithModel(model string) agent.Agent { return a }
+
+func (a *commandTestAgent) CommandLine() string { return a.command }
+
+func (a *commandTestAgent) CommandName() string { return a.command }
 
 func TestHandleStatus(t *testing.T) {
 	server, _, _ := newTestServer(t)
@@ -361,6 +388,11 @@ func TestHandleRerunJob(t *testing.T) {
 	t.Run("rerun reevaluates implicit effective model", func(t *testing.T) {
 		isolatedDB, isolatedDir := testutil.OpenTestDBWithDir(t)
 		server := NewServer(isolatedDB, config.DefaultConfig(), "")
+		agentName := "rerun-implicit-model"
+		agent.Register(&commandTestAgent{name: agentName, command: "go"})
+		t.Cleanup(func() {
+			agent.Unregister(agentName)
+		})
 
 		repo, err := isolatedDB.GetOrCreateRepo(isolatedDir)
 		require.NoError(t, err)
@@ -370,7 +402,7 @@ func TestHandleRerunJob(t *testing.T) {
 			RepoID:   repo.ID,
 			CommitID: commit.ID,
 			GitRef:   "rerun-implicit-model",
-			Agent:    "opencode",
+			Agent:    agentName,
 			Model:    "minimax-m2.5-free",
 		})
 		require.NoError(t, err)
@@ -379,7 +411,7 @@ func TestHandleRerunJob(t *testing.T) {
 		require.NoError(t, err)
 		require.NotNil(t, claimed)
 		require.Equal(t, job.ID, claimed.ID)
-		require.NoError(t, isolatedDB.CompleteJob(job.ID, "opencode", "prompt", "output"))
+		require.NoError(t, isolatedDB.CompleteJob(job.ID, agentName, "prompt", "output"))
 
 		req := testutil.MakeJSONRequest(t, http.MethodPost, "/api/job/rerun", RerunJobRequest{JobID: job.ID})
 		w := httptest.NewRecorder()
@@ -551,6 +583,106 @@ func TestResolveRerunModelProviderRejectsInvalidWorktreeConfig(t *testing.T) {
 	)
 	require.Error(t, err)
 	require.ErrorContains(t, err, "rerun job worktree path is stale or invalid")
+	assert.Empty(t, model)
+	assert.Empty(t, provider)
+}
+
+func TestResolveRerunModelProviderRejectsInvalidWorktreeWithRequestedOverrides(t *testing.T) {
+	mainRepo := t.TempDir()
+	stalePath := t.TempDir()
+
+	require.NoError(t, os.WriteFile(filepath.Join(mainRepo, ".roborev.toml"), []byte("review_model = \"main-model\"\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(stalePath, ".roborev.toml"), []byte("review_model = \"stale-model\"\n"), 0o644))
+
+	job := &storage.ReviewJob{
+		Agent:             "test",
+		JobType:           storage.JobTypeReview,
+		ReviewType:        config.ReviewTypeDefault,
+		Reasoning:         "thorough",
+		RepoPath:          mainRepo,
+		WorktreePath:      stalePath,
+		RequestedModel:    "requested-model",
+		RequestedProvider: "anthropic",
+	}
+
+	model, provider, err := resolveRerunModelProvider(
+		job, config.DefaultConfig(),
+	)
+	require.Error(t, err)
+	require.ErrorContains(t, err, "rerun job worktree path is stale or invalid")
+	assert.Empty(t, model)
+	assert.Empty(t, provider)
+}
+
+func TestResolveRerunModelProviderPreservesRequestedOverridesOnParseableInvalidConfig(t *testing.T) {
+	mainRepo := t.TempDir()
+
+	require.NoError(t, os.WriteFile(filepath.Join(mainRepo, ".roborev.toml"), []byte("review_reasoning = \"bogus\"\n"), 0o644))
+
+	job := &storage.ReviewJob{
+		Agent:             "test",
+		JobType:           storage.JobTypeReview,
+		ReviewType:        config.ReviewTypeDefault,
+		Reasoning:         "thorough",
+		RepoPath:          mainRepo,
+		RequestedModel:    "requested-model",
+		RequestedProvider: "anthropic",
+	}
+
+	model, provider, err := resolveRerunModelProvider(
+		job, config.DefaultConfig(),
+	)
+	require.NoError(t, err)
+	assert.Equal(t, "requested-model", model)
+	assert.Equal(t, "anthropic", provider)
+}
+
+func TestResolveRerunModelProviderRejectsMalformedConfigWithRequestedOverrides(t *testing.T) {
+	mainRepo := t.TempDir()
+
+	require.NoError(t, os.WriteFile(
+		filepath.Join(mainRepo, ".roborev.toml"),
+		[]byte("this is not valid toml [[["),
+		0o644,
+	))
+
+	job := &storage.ReviewJob{
+		Agent:             "test",
+		JobType:           storage.JobTypeReview,
+		ReviewType:        config.ReviewTypeDefault,
+		Reasoning:         "thorough",
+		RepoPath:          mainRepo,
+		RequestedModel:    "requested-model",
+		RequestedProvider: "anthropic",
+	}
+
+	model, provider, err := resolveRerunModelProvider(
+		job, config.DefaultConfig(),
+	)
+	require.Error(t, err)
+	require.ErrorContains(t, err, "resolve workflow config")
+	assert.Empty(t, model)
+	assert.Empty(t, provider)
+}
+
+func TestResolveRerunModelProviderRejectsInvalidAgentWithRequestedOverrides(t *testing.T) {
+	mainRepo := t.TempDir()
+
+	job := &storage.ReviewJob{
+		Agent:             "missing-agent",
+		JobType:           storage.JobTypeReview,
+		ReviewType:        config.ReviewTypeDefault,
+		Reasoning:         "thorough",
+		RepoPath:          mainRepo,
+		RequestedModel:    "requested-model",
+		RequestedProvider: "anthropic",
+	}
+
+	model, provider, err := resolveRerunModelProvider(
+		job, config.DefaultConfig(),
+	)
+	require.Error(t, err)
+	require.ErrorContains(t, err, `invalid agent: unknown agent "missing-agent"`)
 	assert.Empty(t, model)
 	assert.Empty(t, provider)
 }
