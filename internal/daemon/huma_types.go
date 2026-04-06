@@ -1,0 +1,213 @@
+package daemon
+
+import (
+	"github.com/roborev-dev/roborev/internal/storage"
+)
+
+// -- GET /api/jobs --
+
+// ListJobsInput holds query parameters for listing jobs.
+// Huma does not support pointer types for query parameters,
+// so we use sentinel defaults to detect presence:
+//   - ID, Before: default -1 (valid IDs are always positive)
+//   - Limit: default limitNotProvided (so explicit negative
+//     values like -1 are treated as unlimited, matching legacy)
+//   - Offset: default -1 (negative offsets clamp to 0)
+type ListJobsInput struct {
+	ID                 int64  `query:"id" default:"-1" doc:"Return a single job by ID"`
+	Status             string `query:"status" doc:"Filter by job status"`
+	Repo               string `query:"repo" doc:"Filter by repo root path"`
+	GitRef             string `query:"git_ref" doc:"Filter by git ref"`
+	Branch             string `query:"branch" doc:"Filter by branch name"`
+	BranchIncludeEmpty string `query:"branch_include_empty" doc:"Include jobs with no branch when filtering by branch" enum:"true,false,"`
+	Closed             string `query:"closed" doc:"Filter by review closed state" enum:"true,false,"`
+	JobType            string `query:"job_type" doc:"Filter by job type"`
+	ExcludeJobType     string `query:"exclude_job_type" doc:"Exclude jobs of this type"`
+	RepoPrefix         string `query:"repo_prefix" doc:"Filter repos by path prefix"`
+	Limit              int    `query:"limit" default:"-999999" doc:"Max results (default 50, 0=unlimited, max 10000)"`
+	Offset             int    `query:"offset" default:"-1" doc:"Skip N results (requires limit>0)"`
+	Before             int64  `query:"before" default:"-1" doc:"Cursor: return jobs with ID < this value"`
+}
+
+// ListJobsOutput is the response for GET /api/jobs.
+type ListJobsOutput struct {
+	Body struct {
+		Jobs    []storage.ReviewJob `json:"jobs"`
+		HasMore bool                `json:"has_more"`
+		Stats   *storage.JobStats   `json:"stats,omitempty"`
+	}
+}
+
+// -- GET /api/review --
+
+// GetReviewInput holds query parameters for fetching a review.
+type GetReviewInput struct {
+	JobID int64  `query:"job_id" default:"-1" doc:"Look up review by job ID"`
+	SHA   string `query:"sha" doc:"Look up review by commit SHA"`
+}
+
+// GetReviewOutput is the response for GET /api/review.
+type GetReviewOutput struct {
+	Body *storage.Review
+}
+
+// -- Shared request/response types (used by Huma handlers) --
+
+// CancelJobRequest is the JSON body for POST /api/job/cancel.
+type CancelJobRequest struct {
+	JobID int64 `json:"job_id"`
+}
+
+// RerunJobRequest is the JSON body for POST /api/job/rerun.
+type RerunJobRequest struct {
+	JobID int64 `json:"job_id"`
+}
+
+// AddCommentRequest is the JSON body for POST /api/comment.
+type AddCommentRequest struct {
+	SHA       string `json:"sha,omitempty"`    // Legacy: link to commit by SHA
+	JobID     int64  `json:"job_id,omitempty"` // Preferred: link to job
+	Commenter string `json:"commenter"`
+	Comment   string `json:"comment"`
+}
+
+// CloseReviewRequest is the JSON body for POST /api/review/close.
+type CloseReviewRequest struct {
+	JobID  int64 `json:"job_id"`
+	Closed bool  `json:"closed"`
+}
+
+// JobOutputResponse is the response for GET /api/job/output.
+type JobOutputResponse struct {
+	JobID   int64        `json:"job_id"`
+	Status  string       `json:"status"`
+	Lines   []OutputLine `json:"lines"`
+	HasMore bool         `json:"has_more"`
+}
+
+// -- POST /api/job/cancel --
+
+// CancelJobInput is the request body for canceling a job.
+type CancelJobInput struct {
+	Body CancelJobRequest
+}
+
+// CancelJobOutput is the response for POST /api/job/cancel.
+type CancelJobOutput struct {
+	Body struct {
+		Success bool `json:"success"`
+	}
+}
+
+// -- POST /api/job/rerun --
+
+// RerunJobInput is the request body for rerunning a job.
+type RerunJobInput struct {
+	Body RerunJobRequest
+}
+
+// RerunJobOutput is the response for POST /api/job/rerun.
+type RerunJobOutput struct {
+	Body struct {
+		Success bool `json:"success"`
+	}
+}
+
+// -- POST /api/review/close --
+
+// CloseReviewInput is the request body for closing/reopening a review.
+type CloseReviewInput struct {
+	Body CloseReviewRequest
+}
+
+// CloseReviewOutput is the response for POST /api/review/close.
+type CloseReviewOutput struct {
+	Body struct {
+		Success bool `json:"success"`
+	}
+}
+
+// -- POST /api/comment --
+
+// AddCommentInput is the request body for adding a comment.
+type AddCommentInput struct {
+	Body AddCommentRequest
+}
+
+// AddCommentOutput is the response for POST /api/comment.
+type AddCommentOutput struct {
+	Body *storage.Response
+}
+
+// -- GET /api/comments --
+
+// ListCommentsInput holds query parameters for listing comments.
+type ListCommentsInput struct {
+	JobID    int64  `query:"job_id" default:"-1" doc:"List comments by job ID"`
+	CommitID int64  `query:"commit_id" default:"-1" doc:"List comments by commit ID"`
+	SHA      string `query:"sha" doc:"List comments by commit SHA"`
+}
+
+// ListCommentsOutput is the response for GET /api/comments.
+type ListCommentsOutput struct {
+	Body struct {
+		Responses []storage.Response `json:"responses"`
+	}
+}
+
+// -- GET /api/repos --
+
+// ListReposInput holds query parameters for listing repos.
+type ListReposInput struct {
+	Branch string `query:"branch" doc:"Filter to repos with jobs on this branch"`
+	Prefix string `query:"prefix" doc:"Filter repos by path prefix"`
+}
+
+// ListReposOutput is the response for GET /api/repos.
+type ListReposOutput struct {
+	Body struct {
+		Repos      []storage.RepoWithCount `json:"repos"`
+		TotalCount int                     `json:"total_count"`
+	}
+}
+
+// -- GET /api/branches --
+
+// ListBranchesInput holds query parameters for listing branches.
+type ListBranchesInput struct {
+	Repo []string `query:"repo,explode" doc:"Filter to branches in these repo paths"`
+}
+
+// ListBranchesOutput is the response for GET /api/branches.
+type ListBranchesOutput struct {
+	Body struct {
+		Branches       []storage.BranchWithCount `json:"branches"`
+		TotalCount     int                       `json:"total_count"`
+		NullsRemaining int                       `json:"nulls_remaining"`
+	}
+}
+
+// -- GET /api/status --
+
+// GetStatusInput is an empty input for the status endpoint.
+type GetStatusInput struct{}
+
+// GetStatusOutput is the response for GET /api/status.
+type GetStatusOutput struct {
+	Body storage.DaemonStatus
+}
+
+// -- GET /api/summary --
+
+// GetSummaryInput holds query parameters for the summary endpoint.
+type GetSummaryInput struct {
+	Since  string `query:"since" doc:"Time window (e.g. 7d, 24h). Default: 7d"`
+	Repo   string `query:"repo" doc:"Filter by repo root path"`
+	Branch string `query:"branch" doc:"Filter by branch name"`
+	All    string `query:"all" doc:"Include per-repo breakdown" enum:"true,false"`
+}
+
+// GetSummaryOutput is the response for GET /api/summary.
+type GetSummaryOutput struct {
+	Body *storage.Summary
+}
