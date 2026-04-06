@@ -388,6 +388,21 @@ func (wp *WorkerPool) processJob(workerID string, job *storage.ReviewJob) {
 		// discussion context survives retries and failover.
 		reviewPrompt = storedPromptValue
 		promptToPersist = storedPromptValue
+		var cleanup func()
+		excludes := config.ResolveExcludePatterns(
+			effectiveRepoPath, cfg, job.ReviewType,
+		)
+		reviewPrompt, cleanup, err = preparePrebuiltPrompt(
+			effectiveRepoPath, job, reviewPrompt, excludes,
+		)
+		if cleanup != nil {
+			defer cleanup()
+		}
+		if err != nil {
+			log.Printf("[%s] Error preparing prebuilt prompt: %v", workerID, err)
+			wp.failOrRetry(workerID, job, job.Agent, fmt.Sprintf("prepare prebuilt prompt: %v", err))
+			return
+		}
 	} else if job.UsesStoredPrompt() && job.Prompt != "" {
 		// Prompt-native job (task, compact) — prepend agent-specific preamble
 		preamble := prompt.GetSystemPrompt(job.Agent, "run")
@@ -404,10 +419,28 @@ func (wp *WorkerPool) processJob(workerID string, job *storage.ReviewJob) {
 		err = fmt.Errorf("%s job %d has no stored prompt (git_ref=%q); restart the daemon with 'roborev daemon restart'", job.JobType, job.ID, job.GitRef)
 	} else if job.DiffContent != nil {
 		// Dirty job - use pre-captured diff
-		reviewPrompt, err = pb.BuildDirty(effectiveRepoPath, *job.DiffContent, job.RepoID, cfg.ReviewContextCount, job.Agent, job.ReviewType)
+		dirtyResult, dirtyErr := pb.BuildDirtyWithSnapshot(effectiveRepoPath, *job.DiffContent, job.RepoID, cfg.ReviewContextCount, job.Agent, job.ReviewType)
+		if dirtyResult.Cleanup != nil {
+			defer dirtyResult.Cleanup()
+		}
+		reviewPrompt = dirtyResult.Prompt
+		err = dirtyErr
 	} else {
-		// Normal job - build prompt from git ref
-		reviewPrompt, err = pb.Build(effectiveRepoPath, job.GitRef, job.RepoID, cfg.ReviewContextCount, job.Agent, job.ReviewType)
+		// Normal job - build prompt from git ref, writing a diff
+		// snapshot file when the diff is too large to inline.
+		excludes := config.ResolveExcludePatterns(
+			effectiveRepoPath, cfg, job.ReviewType,
+		)
+		snapResult, snapErr := pb.BuildWithSnapshot(
+			effectiveRepoPath, job.GitRef, job.RepoID,
+			cfg.ReviewContextCount, job.Agent,
+			job.ReviewType, excludes,
+		)
+		if snapResult.Cleanup != nil {
+			defer snapResult.Cleanup()
+		}
+		reviewPrompt = snapResult.Prompt
+		err = snapErr
 	}
 	if err != nil {
 		log.Printf("[%s] Error building prompt: %v", workerID, err)
@@ -992,6 +1025,33 @@ func (wp *WorkerPool) failoverOrFail(
 		}
 		wp.logJobFailed(job.ID, workerID, agentName, quotaMsg)
 	}
+}
+
+func preparePrebuiltPrompt(
+	repoPath string, job *storage.ReviewJob, reviewPrompt string, excludes []string,
+) (string, func(), error) {
+	if !strings.Contains(reviewPrompt, prompt.DiffFilePathPlaceholder) {
+		return reviewPrompt, nil, nil
+	}
+	diffFile, cleanup, err := prompt.WriteDiffSnapshot(
+		repoPath, job.GitRef, excludes,
+	)
+	if err != nil {
+		return "", nil, fmt.Errorf("prepare diff snapshot for prebuilt prompt: %w", err)
+	}
+	replacer := strings.NewReplacer(
+		shellQuoteForPrompt(prompt.DiffFilePathPlaceholder),
+		shellQuoteForPrompt(diffFile),
+		prompt.DiffFilePathPlaceholder, diffFile,
+	)
+	return replacer.Replace(reviewPrompt), cleanup, nil
+}
+
+func shellQuoteForPrompt(s string) string {
+	if s == "" {
+		return "''"
+	}
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 // logJobFailed logs a job failure to the activity log
