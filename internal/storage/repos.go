@@ -10,16 +10,60 @@ import (
 	"strings"
 )
 
+func normalizeRepoPath(rootPath string) (string, error) {
+	if isWindowsAbsPath(rootPath) {
+		return normalizeStoredRepoPath(rootPath), nil
+	}
+
+	absPath, err := filepath.Abs(rootPath)
+	if err != nil {
+		return "", err
+	}
+	return filepath.ToSlash(absPath), nil
+}
+
+func normalizeStoredRepoPath(rootPath string) string {
+	if isWindowsAbsPath(rootPath) {
+		return strings.ReplaceAll(rootPath, `\`, "/")
+	}
+	return rootPath
+}
+
+func normalizeRepoPathBestEffort(rootPath string) string {
+	normalized, err := normalizeRepoPath(rootPath)
+	if err == nil {
+		return normalized
+	}
+	if isWindowsAbsPath(rootPath) {
+		return strings.ReplaceAll(rootPath, `\`, "/")
+	}
+	return filepath.ToSlash(rootPath)
+}
+
+func normalizeRepoPathPrefix(prefix string) string {
+	if prefix == "" {
+		return ""
+	}
+	return strings.TrimRight(normalizeRepoPathBestEffort(prefix), "/")
+}
+
+func isWindowsAbsPath(p string) bool {
+	return len(p) >= 3 && isASCIIAlpha(p[0]) && p[1] == ':' && (p[2] == '\\' || p[2] == '/')
+}
+
+func isASCIIAlpha(b byte) bool {
+	return (b >= 'A' && b <= 'Z') || (b >= 'a' && b <= 'z')
+}
+
 // GetOrCreateRepo finds or creates a repo by its root path.
 // If identity is provided, it will be stored; otherwise the identity field remains NULL.
 func (db *DB) GetOrCreateRepo(rootPath string, identity ...string) (*Repo, error) {
 	// Normalize path to forward slashes for consistent storage
 	// across platforms (LIKE queries use '/' as separator).
-	absPath, err := filepath.Abs(rootPath)
+	absPath, err := normalizeRepoPath(rootPath)
 	if err != nil {
 		return nil, err
 	}
-	absPath = filepath.ToSlash(absPath)
 
 	// Extract optional identity
 	var repoIdentity string
@@ -90,11 +134,10 @@ func (db *DB) GetOrCreateRepo(rootPath string, identity ...string) (*Repo, error
 
 // GetRepoByPath returns a repo by its path
 func (db *DB) GetRepoByPath(rootPath string) (*Repo, error) {
-	absPath, err := filepath.Abs(rootPath)
+	absPath, err := normalizeRepoPath(rootPath)
 	if err != nil {
 		return nil, err
 	}
-	absPath = filepath.ToSlash(absPath)
 
 	var repo Repo
 	var createdAt string
@@ -111,6 +154,7 @@ func (db *DB) GetRepoByPath(rootPath string) (*Repo, error) {
 type RepoWithCount struct {
 	Name     string `json:"name"`
 	RootPath string `json:"root_path"`
+	Identity string `json:"identity,omitempty"`
 	Count    int    `json:"count"`
 }
 
@@ -125,7 +169,7 @@ type listReposOptions struct {
 // WithRepoPathPrefix filters repos whose root_path starts with the given prefix.
 func WithRepoPathPrefix(prefix string) ListReposOption {
 	return func(o *listReposOptions) {
-		o.prefix = strings.TrimRight(prefix, "/")
+		o.prefix = normalizeRepoPathPrefix(prefix)
 	}
 }
 
@@ -151,7 +195,7 @@ func (db *DB) ListReposWithReviewCounts(opts ...ListReposOption) ([]RepoWithCoun
 	}
 
 	query := fmt.Sprintf(`
-		SELECT r.name, r.root_path, COUNT(rj.id) as job_count
+		SELECT r.name, r.root_path, COALESCE(r.identity, ''), COUNT(rj.id) as job_count
 		FROM repos r
 		%s JOIN review_jobs rj ON rj.repo_id = r.id
 	`, joinType)
@@ -200,7 +244,7 @@ func (db *DB) ListReposWithReviewCounts(opts ...ListReposOption) ([]RepoWithCoun
 	totalCount := 0
 	for rows.Next() {
 		var rc RepoWithCount
-		if err := rows.Scan(&rc.Name, &rc.RootPath, &rc.Count); err != nil {
+		if err := rows.Scan(&rc.Name, &rc.RootPath, &rc.Identity, &rc.Count); err != nil {
 			return nil, 0, err
 		}
 		repos = append(repos, rc)
@@ -293,26 +337,63 @@ func (db *DB) ListBranchesWithCounts(repoPaths []string) (*BranchListResult, err
 // RenameRepo updates the display name of a repo identified by its path or current name
 func (db *DB) RenameRepo(identifier, newName string) (int64, error) {
 	// Try to match by root_path first (absolute or relative), then by name
-	absPath, _ := filepath.Abs(identifier)
-	absPath = filepath.ToSlash(absPath)
+	absPath, pathErr := normalizeRepoPath(identifier)
 
 	// Try path match first
-	result, err := db.Exec(`UPDATE repos SET name = ? WHERE root_path = ?`, newName, absPath)
+	if pathErr == nil {
+		result, err := db.Exec(`UPDATE repos SET name = ? WHERE root_path = ?`, newName, absPath)
+		if err != nil {
+			return 0, err
+		}
+		affected, _ := result.RowsAffected()
+		if affected > 0 {
+			return affected, nil
+		}
+	}
+
+	// Try name match
+	result, err := db.Exec(`UPDATE repos SET name = ? WHERE name = ?`, newName, identifier)
 	if err != nil {
 		return 0, err
 	}
 	affected, _ := result.RowsAffected()
-	if affected > 0 {
-		return affected, nil
+	return affected, nil
+}
+
+// ErrRepoPathConflict is returned when MoveRepo would create a duplicate root_path.
+var ErrRepoPathConflict = errors.New("a different repository already has the target path; use 'roborev repo merge' instead")
+
+// MoveRepo updates the root_path of an existing repo. The newPath is normalized
+// to an absolute path with forward slashes. Optionally updates the identity if
+// newIdentity is non-empty.
+//
+// Returns ErrRepoPathConflict if another repo (different ID) already has the
+// target path - users should `repo merge` in that case.
+func (db *DB) MoveRepo(repoID int64, newPath, newIdentity string) error {
+	absPath, err := normalizeRepoPath(newPath)
+	if err != nil {
+		return fmt.Errorf("resolve new path: %w", err)
 	}
 
-	// Try name match
-	result, err = db.Exec(`UPDATE repos SET name = ? WHERE name = ?`, newName, identifier)
-	if err != nil {
-		return 0, err
+	// Detect conflict: another repo already at this path
+	var existingID int64
+	err = db.QueryRow(`SELECT id FROM repos WHERE root_path = ?`, absPath).Scan(&existingID)
+	if err == nil && existingID != repoID {
+		return ErrRepoPathConflict
 	}
-	affected, _ = result.RowsAffected()
-	return affected, nil
+	if err != nil && err != sql.ErrNoRows {
+		return fmt.Errorf("check path conflict: %w", err)
+	}
+
+	if newIdentity != "" {
+		_, err = db.Exec(`UPDATE repos SET root_path = ?, identity = ? WHERE id = ?`, absPath, newIdentity, repoID)
+	} else {
+		_, err = db.Exec(`UPDATE repos SET root_path = ? WHERE id = ?`, absPath, repoID)
+	}
+	if err != nil {
+		return fmt.Errorf("update repo path: %w", err)
+	}
+	return nil
 }
 
 // ListRepos returns all repos in the database
@@ -365,8 +446,7 @@ func (db *DB) GetRepoByName(name string) (*Repo, error) {
 // FindRepo finds a repo by path or name (tries path first, then name)
 func (db *DB) FindRepo(identifier string) (*Repo, error) {
 	// Try by path first
-	absPath, _ := filepath.Abs(identifier)
-	repo, err := db.GetRepoByPath(absPath)
+	repo, err := db.GetRepoByPath(identifier)
 	if err == nil {
 		return repo, nil
 	}

@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/roborev-dev/roborev/internal/config"
 	"github.com/roborev-dev/roborev/internal/storage"
 )
 
@@ -159,6 +160,104 @@ func (m model) repoMatchesFilter(repoPath string) bool {
 	return slices.Contains(m.activeRepoFilter, repoPath)
 }
 
+func (m model) displayNameForRootPaths(rootPaths []string) string {
+	names := make([]string, 0, len(m.repoNames))
+	for name := range m.repoNames {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		if rootPathsMatch(m.repoNames[name], rootPaths) {
+			return name
+		}
+	}
+	for _, node := range m.filterTree {
+		if rootPathsMatch(node.rootPaths, rootPaths) {
+			return node.name
+		}
+	}
+	if len(rootPaths) == 1 {
+		for _, job := range m.jobs {
+			if job.RepoPath == rootPaths[0] && job.RepoName != "" {
+				return job.RepoName
+			}
+		}
+	}
+	return ""
+}
+
+func (m model) repoFilterDisplayName() string {
+	if len(m.activeRepoFilter) == 0 {
+		return ""
+	}
+	if name := m.displayNameForRootPaths(m.activeRepoFilter); name != "" {
+		return name
+	}
+	if len(m.activeRepoFilter) == 1 {
+		return m.getDisplayName(
+			m.activeRepoFilter[0],
+			filepath.Base(m.activeRepoFilter[0]),
+		)
+	}
+	return strings.Join(m.activeRepoFilter, ", ")
+}
+
+func (m model) repoRootTracked(rootPath string) bool {
+	if rootPath == "" {
+		return false
+	}
+	for _, rootPaths := range m.repoNames {
+		if slices.Contains(rootPaths, rootPath) {
+			return true
+		}
+	}
+	for _, rootPaths := range m.repoIdentities {
+		if slices.Contains(rootPaths, rootPath) {
+			return true
+		}
+	}
+	for _, node := range m.filterTree {
+		if slices.Contains(node.rootPaths, rootPath) {
+			return true
+		}
+	}
+	return false
+}
+
+func (m *model) reconcileAutoRepoFilter() bool {
+	if !m.autoRepoFilter || len(m.activeRepoFilter) != 1 ||
+		m.cwdRepoRoot == "" || m.activeRepoFilter[0] != m.cwdRepoRoot {
+		return false
+	}
+	if m.repoRootTracked(m.cwdRepoRoot) {
+		return false
+	}
+
+	var rootPaths []string
+	if m.cwdRepoIdentity != "" {
+		rootPaths = m.repoIdentities[m.cwdRepoIdentity]
+	}
+	if len(rootPaths) == 0 {
+		displayName := config.GetDisplayName(m.cwdRepoRoot)
+		if displayName == "" {
+			displayName = filepath.Base(m.cwdRepoRoot)
+		}
+		rootPaths = m.repoNames[displayName]
+	}
+	if len(rootPaths) == 0 || rootPathsMatch(rootPaths, m.activeRepoFilter) {
+		return false
+	}
+
+	m.activeRepoFilter = copyStrings(rootPaths)
+	m.hasMore = false
+	m.selectedIdx = -1
+	m.selectedJobID = 0
+	m.fetchSeq++
+	m.queueColGen++
+	m.loadingJobs = true
+	return true
+}
+
 // isJobVisible checks if a job passes all active filters
 func (m model) isJobVisible(job storage.ReviewJob) bool {
 	if len(m.activeRepoFilter) > 0 && !m.repoMatchesFilter(job.RepoPath) {
@@ -219,6 +318,7 @@ func (m *model) popFilter() string {
 		switch ft {
 		case filterTypeRepo:
 			m.activeRepoFilter = nil
+			m.autoRepoFilter = false
 		case filterTypeBranch:
 			m.activeBranchFilter = ""
 		}

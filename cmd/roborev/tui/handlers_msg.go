@@ -258,6 +258,10 @@ func (m model) handleRepoNamesMsg(
 ) (tea.Model, tea.Cmd) {
 	if msg.names != nil {
 		m.repoNames = msg.names
+		m.repoIdentities = msg.identities
+		if m.reconcileAutoRepoFilter() {
+			return m, m.fetchJobs()
+		}
 	}
 	return m, nil
 }
@@ -267,6 +271,7 @@ func (m model) handleReposMsg(
 	msg reposMsg,
 ) (tea.Model, tea.Cmd) {
 	m.consecutiveErrors = 0
+	refetchJobs := false
 
 	// Refresh repoNames when the modal fetch was unfiltered (no
 	// branch constraint), so newly registered repos are picked up.
@@ -278,6 +283,8 @@ func (m model) handleReposMsg(
 			names[r.name] = r.rootPaths
 		}
 		m.repoNames = names
+		m.repoIdentities = msg.identities
+		refetchJobs = m.reconcileAutoRepoFilter()
 	}
 
 	// Build filterTree from repos (all collapsed, no children)
@@ -341,14 +348,24 @@ func (m model) handleReposMsg(
 				break
 			}
 		}
-		return m, m.fetchBranchesForRepo(
+		branchCmd := m.fetchBranchesForRepo(
 			m.filterTree[targetIdx].rootPaths,
 			targetIdx, true, m.filterSearchSeq,
 		)
+		if refetchJobs {
+			return m, tea.Batch(m.fetchJobs(), branchCmd)
+		}
+		return m, branchCmd
 	}
 	// If user typed search before repos loaded, kick off fetches
 	if cmd := m.fetchUnloadedBranches(); cmd != nil {
+		if refetchJobs {
+			return m, tea.Batch(m.fetchJobs(), cmd)
+		}
 		return m, cmd
+	}
+	if refetchJobs {
+		return m, m.fetchJobs()
 	}
 	return m, nil
 }

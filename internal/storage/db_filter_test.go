@@ -517,6 +517,10 @@ func TestListReposWithReviewCountsByBranch(t *testing.T) {
 
 	repo1 := createRepo(t, db, "/tmp/repo1")
 	repo2 := createRepo(t, db, "/tmp/repo2")
+	repo1Identity := "https://github.com/test/repo1.git"
+	repo2Identity := "https://github.com/test/repo2.git"
+	require.NoError(t, db.SetRepoIdentity(repo1.ID, repo1Identity))
+	require.NoError(t, db.SetRepoIdentity(repo2.ID, repo2Identity))
 
 	commit1 := createCommit(t, db, repo1.ID, "abc123")
 	commit2 := createCommit(t, db, repo1.ID, "def456")
@@ -536,6 +540,12 @@ func TestListReposWithReviewCountsByBranch(t *testing.T) {
 
 		assert.Len(t, repos, 2)
 		assert.Equal(t, 2, totalCount)
+		identities := map[string]string{}
+		for _, repo := range repos {
+			identities[repo.Name] = repo.Identity
+		}
+		assert.Equal(t, repo1Identity, identities["repo1"])
+		assert.Equal(t, repo2Identity, identities["repo2"])
 	})
 
 	t.Run("filter by feature branch", func(t *testing.T) {
@@ -544,6 +554,7 @@ func TestListReposWithReviewCountsByBranch(t *testing.T) {
 
 		assert.Len(t, repos, 1)
 		assert.Equal(t, 1, totalCount)
+		assert.Equal(t, repo1Identity, repos[0].Identity)
 	})
 
 	t.Run("filter by (none) branch", func(t *testing.T) {
@@ -820,27 +831,33 @@ func TestPrefixFilterWithSpecialChars(t *testing.T) {
 		assert.Equal(t, 2, total)
 	})
 
-	t.Run("backslash in path does not cause SQL error", func(t *testing.T) {
+	t.Run("backslash prefix matches normalized Windows path", func(t *testing.T) {
 
 		createRepo(t, db, `C:\Users\dev\workspace\project-a`)
 		rA, _ := db.GetRepoByPath(`C:\Users\dev\workspace\project-a`)
 		cA := createCommit(t, db, rA.ID, "win-a")
 		enqueueJob(t, db, rA.ID, cA.ID, "win-a")
+		claimed := claimJob(t, db, "w2")
+		require.NoError(t, db.CompleteJob(claimed.ID, "codex", "p", "o"))
 
-		_, err := db.ListJobs(
+		jobs, err := db.ListJobs(
 			"", "", 50, 0, WithRepoPrefix(`C:\Users\dev\workspace`),
 		)
 		require.NoError(t, err, "ListJobs with backslash prefix should not error: %v")
+		assert.Len(t, jobs, 1)
 
-		_, err = db.CountJobStats(
+		stats, err := db.CountJobStats(
 			"", WithRepoPrefix(`C:\Users\dev\workspace`),
 		)
 		require.NoError(t, err, "CountJobStats with backslash prefix should not error: %v")
+		assert.Equal(t, 1, stats.Open)
 
-		_, _, err = db.ListReposWithReviewCounts(
+		repos, total, err := db.ListReposWithReviewCounts(
 			WithRepoPathPrefix(`C:\Users\dev\workspace`),
 		)
 		require.NoError(t, err, "ListReposWithReviewCounts with backslash prefix should not error: %v")
+		assert.Len(t, repos, 1)
+		assert.Equal(t, 1, total)
 
 	})
 }
