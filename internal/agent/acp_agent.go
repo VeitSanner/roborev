@@ -12,6 +12,7 @@ import (
 
 	acp "github.com/coder/acp-go-sdk"
 	"github.com/roborev-dev/roborev/internal/config"
+	"github.com/roborev-dev/roborev/internal/version"
 )
 
 // Security error for path traversal attempts
@@ -269,6 +270,10 @@ func (a *ACPAgent) Review(ctx context.Context, repoPath, commitSHA, prompt strin
 
 	_, err = conn.Initialize(ctx, acp.InitializeRequest{
 		ProtocolVersion: acp.ProtocolVersionNumber,
+		ClientInfo: &acp.Implementation{
+			Name:    "roborev",
+			Version: version.Version,
+		},
 		ClientCapabilities: acp.ClientCapabilities{
 			Fs: acp.FileSystemCapabilities{
 				ReadTextFile:  true,
