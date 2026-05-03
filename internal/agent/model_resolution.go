@@ -76,8 +76,8 @@ func (w WorkflowConfig) ModelForSelectedAgent(
 		selectedAgent, cliModel, w.RepoPath,
 		w.GlobalConfig, w.Workflow, w.Reasoning,
 	)
-	// For ACP agents with no CLI/workflow model, fall back to configured ACP model
-	if model == "" && strings.TrimSpace(cliModel) == "" &&
+	// For ACP agents with no workflow model, fall back to configured ACP model
+	if model == "" &&
 		isConfiguredACPAgentName(selectedAgent, w.GlobalConfig, w.RepoPath) {
 		acpCfg := config.ResolveACPAgentConfig(w.RepoPath, w.GlobalConfig)
 		if acpCfg != nil && acpCfg.Model != "" {
