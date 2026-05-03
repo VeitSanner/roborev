@@ -72,10 +72,19 @@ func (w WorkflowConfig) ModelForSelectedAgent(
 		strings.TrimSpace(cliModel) == "" {
 		return w.BackupModel()
 	}
-	return ResolveWorkflowModelForAgent(
+	model := ResolveWorkflowModelForAgent(
 		selectedAgent, cliModel, w.RepoPath,
 		w.GlobalConfig, w.Workflow, w.Reasoning,
 	)
+	// For ACP agents with no CLI/workflow model, fall back to configured ACP model
+	if model == "" && strings.TrimSpace(cliModel) == "" &&
+		isConfiguredACPAgentName(selectedAgent, w.GlobalConfig, w.RepoPath) {
+		acpCfg := config.ResolveACPAgentConfig(w.RepoPath, w.GlobalConfig)
+		if acpCfg != nil && acpCfg.Model != "" {
+			return acpCfg.Model
+		}
+	}
+	return model
 }
 
 // ResolveWorkflowModelForAgent resolves a workflow model for the actual
