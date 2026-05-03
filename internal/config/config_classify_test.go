@@ -32,7 +32,7 @@ func TestResolveClassifyModel(t *testing.T) {
 
 	t.Run("returns empty when no config", func(t *testing.T) {
 		model := ResolveClassifyModel("", "/tmp/nonexistent", nil)
-		assert.Equal(t, "", model)
+		assert.Empty(t, model)
 	})
 }
 
@@ -60,7 +60,7 @@ func TestResolveBackupClassifyModel(t *testing.T) {
 
 	t.Run("returns empty when no config", func(t *testing.T) {
 		model := ResolveBackupClassifyModel("/tmp/nonexistent", nil)
-		assert.Equal(t, "", model)
+		assert.Empty(t, model)
 	})
 }
 
@@ -153,6 +153,6 @@ func TestResolveBackupClassifyAgent(t *testing.T) {
 	t.Run("returns empty when no config", func(t *testing.T) {
 		agent, err := ResolveBackupClassifyAgent("/tmp/nonexistent", nil)
 		require.NoError(t, err)
-		assert.Equal(t, "", agent)
+		assert.Empty(t, agent)
 	})
 }

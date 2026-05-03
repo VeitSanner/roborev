@@ -2218,18 +2218,20 @@ func ResolveBackupModelForWorkflow(repoPath string, globalCfg *Config, workflow 
 // Priority: repo [acp] config > global [acp] config > nil (no ACP config).
 // Repo-level ACP config completely overrides global ACP config (no merging of individual fields).
 func ResolveACPAgentConfig(repoPath string, globalCfg *Config) *ACPAgentConfig {
-	// Try repo config first
-	repoCfg, err := LoadRepoConfig(repoPath)
-	if err != nil {
-		// Malformed repo config - fall through to global
-		if IsConfigParseError(err) {
-			// Parse error - skip repo config
-		} else {
-			repoCfg = nil
+	// Only try repo config if repoPath is non-empty
+	if repoPath != "" {
+		repoCfg, err := LoadRepoConfig(repoPath)
+		if err != nil {
+			// Malformed repo config - fall through to global
+			if IsConfigParseError(err) {
+				// Parse error - skip repo config
+			} else {
+				repoCfg = nil
+			}
 		}
-	}
-	if repoCfg != nil && repoCfg.ACP != nil {
-		return repoCfg.ACP
+		if repoCfg != nil && repoCfg.ACP != nil {
+			return repoCfg.ACP
+		}
 	}
 
 	// Fall back to global config
