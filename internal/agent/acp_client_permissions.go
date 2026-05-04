@@ -3,8 +3,10 @@ package agent
 import (
 	"context"
 	"fmt"
-	acp "github.com/coder/acp-go-sdk"
+	"log"
 	"strings"
+
+	acp "github.com/coder/acp-go-sdk"
 )
 
 func (c *acpClient) RequestPermission(ctx context.Context, params acp.RequestPermissionRequest) (acp.RequestPermissionResponse, error) {
@@ -89,8 +91,13 @@ func (c *acpClient) RequestPermission(ctx context.Context, params acp.RequestPer
 }
 
 func (c *acpClient) SessionUpdate(ctx context.Context, params acp.SessionNotification) error {
+	// Validate against the established session. Only NewSession may set
+	// c.sessionID; an incoming notification must never bootstrap it, because a
+	// stale or spoofed early notification could otherwise bind the client to
+	// the wrong session and cause later legitimate updates to be rejected.
 	if err := c.validateSessionID(params.SessionId); err != nil {
-		return err
+		log.Printf("ACP session update rejected: %v", err)
+		return nil
 	}
 
 	// Handle streaming updates from the agent
