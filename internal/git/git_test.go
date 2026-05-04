@@ -777,6 +777,33 @@ func TestGetUpstream(t *testing.T) {
 		assert.Equal(t, "upstream/main", missing.Upstream)
 	})
 
+	t.Run("errors for missing slash-named remote tracking config", func(t *testing.T) {
+		repo := NewTestRepo(t)
+		repo.Run("symbolic-ref", "HEAD", "refs/heads/main")
+		repo.CommitFile("file.txt", "content", "initial")
+		repo.Run("config", "branch.main.remote", "company/fork")
+		repo.Run("config", "branch.main.merge", "refs/heads/main")
+
+		upstream, err := GetUpstream(repo.Dir, "HEAD")
+		assert.Empty(t, upstream)
+		var missing *UpstreamMissingError
+		require.ErrorAs(t, err, &missing, "expected UpstreamMissingError, got %T: %v", err, err)
+		assert.Equal(t, "company/fork/main", missing.Upstream)
+	})
+
+	t.Run("ignores url remote tracking config", func(t *testing.T) {
+		repo := NewTestRepo(t)
+		repo.Run("symbolic-ref", "HEAD", "refs/heads/main")
+		repo.CommitFile("file.txt", "content", "initial")
+		repo.Run("checkout", "-b", "feature")
+		repo.Run("config", "branch.feature.remote", "https://example.com/fork.git")
+		repo.Run("config", "branch.feature.merge", "refs/heads/feature")
+
+		upstream, err := GetUpstream(repo.Dir, "HEAD")
+		require.NoError(t, err)
+		assert.Empty(t, upstream)
+	})
+
 	t.Run("handles branch names containing dots", func(t *testing.T) {
 		// Regression: git parses section/subsection/key by splitting on the
 		// first and last dots, so "branch.release/1.2.3.remote" correctly
